@@ -16,6 +16,7 @@
 #include <opencv2/core.hpp>
 #include <opencv2/opencv.hpp>
 #include <cv_bridge/cv_bridge.hpp>
+#include <std_msgs/msg/string.hpp>
 
 class RingDetectorNode : public rclcpp::Node
 {
@@ -58,6 +59,9 @@ private:
 	bool find_locked_ring(const std::vector<RingCandidate> &candidates, RingCandidate &best) const;
 	bool find_predicted_ring(const std::vector<RingCandidate> &candidates, RingCandidate &best) const;
 	bool confirm_far_candidate(const RingCandidate &candidate);
+	void ring_detect_reset_callback(const std_msgs::msg::String::SharedPtr msg);
+
+	rclcpp::Subscription<std_msgs::msg::String>::SharedPtr _ring_detect_reset_sub;
 
 	// ===== Pose estimation =====
 	void estimate_ring_pose_from_image(

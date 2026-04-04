@@ -13,7 +13,8 @@ find_package(Eigen3 REQUIRED)
 find_package(px4_ros2_cpp REQUIRED)
 
 add_executable(ring_pass_mode_node
-  RingPassMode.cpp
+  MissionNode.cpp
+  RingPassController.cpp
 )
 
 target_include_directories(ring_pass_mode_node PRIVATE
@@ -22,8 +23,8 @@ target_include_directories(ring_pass_mode_node PRIVATE
 
 ament_target_dependencies(ring_pass_mode_node
   rclcpp
-  geometry_msgs
   px4_msgs
+  geometry_msgs
   px4_ros2_cpp
 )
 

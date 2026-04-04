@@ -10,6 +10,11 @@
 #include <sensor_msgs/image_encodings.hpp>
 #include <cv_bridge/cv_bridge.hpp>
 
+namespace
+{
+	constexpr char kRingDetectResetTopic[] = "/ring_detect/reset";
+}
+
 RingDetectorNode::RingDetectorNode()
 : Node("ring_detector_node")
 {
@@ -34,6 +39,8 @@ RingDetectorNode::RingDetectorNode()
 	_target_pose_pub = create_publisher<geometry_msgs::msg::PoseStamped>("/target_pose", pub_qos);
 	_target_valid_pub = create_publisher<std_msgs::msg::Bool>("/target_valid", pub_qos);
 	_reset_pub = create_publisher<std_msgs::msg::String>("/reset", pub_qos);
+
+	_ring_detect_reset_sub = create_subscription<std_msgs::msg::String>(kRingDetectResetTopic,rclcpp::QoS(10).reliable(),std::bind(&RingDetectorNode::ring_detect_reset_callback, this, std::placeholders::_1));
 }
 
 void RingDetectorNode::loadParameters()
@@ -43,7 +50,7 @@ void RingDetectorNode::loadParameters()
 
 	declare_parameter<double>("soft_hold_timeout_s", 0.4);
 	declare_parameter<double>("reset_timeout_s", 0.3);
-	declare_parameter<double>("last_seen_hold_timeout_s", 1.5);
+	declare_parameter<double>("last_seen_hold_timeout_s", 1.0);
 
 	declare_parameter<double>("ring_diameter_m", 1.8);
 	declare_parameter<double>("min_area", 700.0);
@@ -216,6 +223,22 @@ void RingDetectorNode::camera_info_callback(const sensor_msgs::msg::CameraInfo::
 	}
 
 	_has_camera_info = true;
+}
+
+void RingDetectorNode::ring_detect_reset_callback(
+	const std_msgs::msg::String::SharedPtr msg)
+{
+	if (!msg) {
+		return;
+	}
+
+	if (msg->data == "RESET") {
+		reset_lock_state();
+
+		RCLCPP_WARN(
+			get_logger(),
+			"[RingDetector] received /ring_detect/reset -> reset lock state");
+	}
 }
 
 std::vector<RingDetectorNode::RingCandidate>
