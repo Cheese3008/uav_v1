@@ -6,9 +6,9 @@
 namespace
 {
     constexpr char kVehicleAttitudeTopic[] = "/fmu/out/vehicle_attitude";
-    constexpr char kTargetErrorFusionTopic[] = "/ring_pass/target_error_body_fusion";
-    constexpr char kTargetVelocityFusionTopic[] = "/ring_pass/target_vel_body_fusion";
-    constexpr char kRingDetectResetTopic[] = "/ring_detect/reset";
+    constexpr char kTargetErrorFusionTopic[] = "/ring_detect/target_error_body_filtered";
+    constexpr char kTargetVelocityFusionTopic[] = "/ring_detect/target_velocity_body_filtered";
+    constexpr char kRingDetectResetTopic[] = "/ring_detect/reset_cmd";
 }
 
 RingPassController::RingPassController(rclcpp::Node& node)

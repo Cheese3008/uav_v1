@@ -1,0 +1,23 @@
+cd ~/tracktor-beam
+source install/setup.bash
+
+ros2 run camera_calibration cameracalibrator \
+  --size 8x6 \
+  --square 0.024 \
+  --no-service-check \
+  --ros-args \
+  --remap image:=/camera_front/image_raw \
+  --remap camera:=/camera_front
+
+
+  sudo systemctl restart cube_detector.service
+
+  colcon build --packages-select 
+
+  cd ~/tracktor-beam
+source install/setup.bash
+
+ros2 run ring_pass_mode ring_pass_mode
+
+colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release
+source install/setup.bash

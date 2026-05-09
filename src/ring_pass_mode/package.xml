@@ -1,23 +1,22 @@
 <?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>ring_pass_mode</name>
   <version>0.0.1</version>
-  <description>PX4 ROS2 ModeBase for flying through a ring</description>
-
-  <maintainer email="you@example.com">you</maintainer>
+  <description>PX4 external mode for flying through a detected ring target.</description>
+  <maintainer email="user@example.com">user</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
   <depend>rclcpp</depend>
-  <depend>geometry_msgs</depend>
+  <depend>px4_msgs</depend>
   <depend>px4_ros2_cpp</depend>
+  <depend>geometry_msgs</depend>
+  <depend>std_msgs</depend>
 
-  <build_depend>eigen3_cmake_module</build_depend>
-  <depend>eigen</depend>
-
-  <test_depend>ament_lint_auto</test_depend>
-  <test_depend>ament_lint_common</test_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

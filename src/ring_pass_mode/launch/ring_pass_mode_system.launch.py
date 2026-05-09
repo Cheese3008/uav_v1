@@ -77,7 +77,7 @@ def generate_launch_description():
         # Ring pass mode node
         Node(
             package='ring_pass_mode',
-            executable='ring_pass_mode_node',
+            executable='ring_pass_mode',
             name='ring_pass_mode',
             output='screen',
         ),

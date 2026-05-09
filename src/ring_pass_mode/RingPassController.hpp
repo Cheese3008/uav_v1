@@ -13,6 +13,8 @@
 #include <px4_ros2/control/setpoint_types/experimental/trajectory.hpp>
 #include <std_msgs/msg/string.hpp>
 
+#include <Eigen/Core>
+
 class RingPassController
 {
 public:
@@ -64,7 +66,6 @@ private:
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr ring_detect_reset_pub_;
 
     px4_msgs::msg::VehicleAttitude vehicle_attitude_msg_{};
-    float missionTargetZ() const;
     bool has_vehicle_attitude_{false};
     void publishDetectorReset();
 

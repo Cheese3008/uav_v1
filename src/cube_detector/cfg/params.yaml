@@ -1,0 +1,71 @@
+cube_detector_node:
+  ros__parameters:
+    topics:
+      image: /camera_down/image_raw
+      camera_info: /camera_down/camera_info
+      vehicle_odometry: /fmu/out/vehicle_odometry
+      reset: /cube_detector/reset
+
+      debug_image: /cube_detector/debug_image
+      hsv_debug: /cube_detector/algorithm_debug
+      performance: /cube_detector/performance
+
+      target_pose: /cube_detector/target_pose
+      target_pose_camera_raw: /cube_detector/target_pose_camera_raw
+      target_pose_world_raw: /cube_detector/target_pose_world_raw
+      target_pose_world_filtered: /cube_detector/target_pose_world_filtered
+      target_velocity_world_filtered: /cube_detector/target_velocity_world_filtered
+      target_valid: /cube_detector/target_valid
+
+    camera_frame_id: camera_optical_frame
+    world_frame_id: map_ned
+
+    # Camera gan cung duoi bung UAV, body PX4 la FRD: X front, Y right, Z down.
+    # Neu camera nam duoi tam drone 9 cm thi Z offset la +0.09, khong phai -0.09.
+    cam_offset_x: 0.0
+    cam_offset_y: 0.0
+    cam_offset_z: 0.09
+
+    box_width_m: 0.45
+
+    h_min: 3
+    s_min: 15
+    v_min: 85
+    h_max: 42
+    s_max: 255
+    v_max: 255
+
+    min_box_area: 2000
+    max_box_area: 200000
+
+    max_lock_missed: 30
+    lock_max_dist_px: 120.0
+    lock_min_size_ratio: 0.5
+    last_seen_hold_timeout_s: 0.5
+
+    kalman_q_acc_x: 0.01
+    kalman_q_acc_y: 0.01
+    kalman_q_acc_z: 0.01
+    kalman_r_pos_x: 0.05
+    kalman_r_pos_y: 0.05
+    kalman_r_pos_z: 0.05
+
+    publish_prediction_when_lost: true
+
+    debug:
+      # Bật/tắt debug hình ảnh.
+      # true  = publish hình debug ra /cube_detector/algorithm_debug
+      # false = không tạo/publish hình debug để giảm tải CPU
+      enable: true
+
+      # Bật/tắt các topic dữ liệu raw để kiểm tra trước/sau transform.
+      # true  = publish:
+      #         /cube_detector/target_pose_camera_raw
+      #         /cube_detector/target_pose_world_raw
+      # false = không publish 2 topic raw này
+      raw_pose_enable: true
+
+      # Bật/tắt topic đo hiệu năng.
+      # true  = publish /cube_detector/performance để xem FPS
+      # false = không publish performance
+      performance_enable: false
