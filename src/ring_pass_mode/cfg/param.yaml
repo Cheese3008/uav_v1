@@ -1,0 +1,57 @@
+/**:
+  ros__parameters:
+    # =========================
+    # Ring target timeout
+    # Mat target qua thoi gian nay thi node se giu vi tri
+    # =========================
+    target_timeout: 0.30
+
+    # =========================
+    # Dt limit cho external mode updateSetpoint
+    # =========================
+    ring_mode_dt_min_sec: 0.005
+    ring_mode_dt_max_sec: 0.10
+
+    # =========================
+    # Lateral controller body-Y
+    # err_lateral > 0 thi bay sang phai theo body frame
+    # =========================
+    ringpass_kp_lat: 0.80
+    ringpass_kd_lat: 0.00
+    ringpass_lat_deadband: 0.03
+    ringpass_v_lateral_max: 1.20
+
+    # =========================
+    # Vertical controller NED-Z
+    # z la truc Down theo NED
+    # ringpass_height_offset la offset mong muon giua tam vong va UAV theo truc z body/fusion
+    # =========================
+    ringpass_kp_z: 0.80
+    ringpass_kd_z: 0.00
+    ringpass_z_deadband: 0.04
+    ringpass_v_vertical_max: 0.70
+    ringpass_height_offset: 0.40
+
+    # =========================
+    # Forward speed body-X
+    # Neu sai so tam vong nho hon r_approach thi bat dau bay xuyen vong
+    # Sai so cang nho thi van toc forward cang tang gan v_forward_max
+    # =========================
+    ringpass_v_forward_min: 1.50
+    ringpass_v_forward_max: 2.00
+    ringpass_r_approach: 0.35
+    ringpass_r_forward_full: 0.10
+    ringpass_klog_forward: 8.00
+
+    # =========================
+    # Slew rate limit
+    # Giam giat lenh van toc dau ra
+    # =========================
+    ringpass_slew_xy: 1.50
+    ringpass_slew_z: 1.20
+
+    # =========================
+    # Finish condition
+    # Khi err_forward <= nguong nay thi coi nhu da xuyen qua vong
+    # =========================
+    ringpass_finish_forward_error: 0.05

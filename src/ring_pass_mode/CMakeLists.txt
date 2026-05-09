@@ -17,7 +17,6 @@ find_package(std_msgs REQUIRED)
 find_package(Eigen3 REQUIRED)
 
 add_executable(ring_pass_mode
-  main.cpp
   RingPassController.cpp
 )
 
@@ -38,8 +37,14 @@ install(TARGETS ring_pass_mode
   DESTINATION lib/${PROJECT_NAME}
 )
 
-install(DIRECTORY launch
+install(DIRECTORY cfg
   DESTINATION share/${PROJECT_NAME}
 )
+
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/launch")
+  install(DIRECTORY launch
+    DESTINATION share/${PROJECT_NAME}
+  )
+endif()
 
 ament_package()

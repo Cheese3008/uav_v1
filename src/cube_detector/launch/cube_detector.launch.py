@@ -18,13 +18,7 @@ def generate_launch_description():
         package='cube_detector',
         executable='cube_detector',
         name='cube_detector',
-        output='screen',
-        parameters=[params_file],
-        remappings=[
-            # You can remap topics here if needed
-            # ('/image', '/camera/image_raw'),
-            # ('/camera_info', '/camera/camera_info'),
-        ]
+        output='screen'
     )
     
     return LaunchDescription([
