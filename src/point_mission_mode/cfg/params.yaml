@@ -1,0 +1,139 @@
+point_mission_mode:
+  ros__parameters:
+    # =========================
+    # Mission geometry
+    # =========================
+    takeoff_altitude_m: 3.0
+    x_distance_m: 8.0
+
+    # BODY-FRD tai thoi diem kich mode:
+    #   +X: Body X UAV
+    #   +Y: Body Y UAV
+    #   -Y: Left UAV
+    #   +Z: Down
+    f_center_offset_x_m: 2.5
+    f_lateral_offset_y_m: 2.5
+    f5_offset_x_m: 2.5
+    lateral_sign: -1.0
+
+    # Thu tu bay:
+    #   TAKEOFF -> F1 -> F3 -> F2 -> F4 -> F5
+    # Tai moi diem:
+    #   1) Bay bang toa do local NED/TrajectorySetpoint updatePosition
+    #   2) Detect HSV bang camera bung
+    #   3) optical -> body FRD -> world NED bang FrameTransformer
+    #   4) Kalman 1D rieng cho sai so x/y
+    #   5) Dieu khien velocity theo sai so XY da loc
+    # Cuoi mission: RETURN_HOME_ALTITUDE -> LAND.
+
+    # =========================
+    # OFFBOARD auto start
+    # Khi run node, node se stream setpoint truoc, sau do gui lenh OFFBOARD + ARM.
+    # =========================
+    offboard:
+      timer_rate_hz: 50.0
+      warmup_setpoint_count: 20
+      command_interval_sec: 1.0
+      auto_arm: true
+      require_offboard_and_armed: false
+
+    # =========================
+    # Position setpoint navigator limits
+    # =========================
+    max_horizontal_speed: 1.2
+    max_vertical_speed: 0.6
+    acceptance_xy: 0.20
+    acceptance_z: 0.15
+    land_command_interval_sec: 1.0
+
+    # =========================
+    # Topics
+    # =========================
+    topics:
+      image: /camera_down/image_raw
+      camera_info: /camera_down/camera_info
+      vehicle_odometry: /fmu/out/vehicle_odometry
+      image_debug: /point_mission/image_debug
+      drop_command: /point_mission/drop_command
+
+    # =========================
+    # Camera mount: belly_fixed_camera, gan cung duoi bung
+    # PX4 body FRD:
+    #   x+: body X, y+: body Y, z+: body Z/down
+    # Doi cam_offset_z tuy cach ban do goc body -> tam camera.
+    # =========================
+    camera_mount:
+      cam_offset_x: 0.0
+      cam_offset_y: 0.0
+      cam_offset_z: -0.10
+
+    # =========================
+    # HSV min/max cho tung mau/khoi
+    # OpenCV HSV: H [0..179], S/V [0..255]
+    # Mau do co wrap hue, red.min.H=170 va red.max.H=10 la hop le.
+    # Detector se tu tach thanh [170..179] U [0..10].
+    # =========================
+    hsv:
+      red:
+        min: [170, 80, 80]
+        max: [10, 255, 255]
+      yellow:
+        min: [20, 80, 80]
+        max: [40, 255, 255]
+      blue:
+        min: [95, 80, 60]
+        max: [130, 255, 255]
+
+    # =========================
+    # Image detector
+    # =========================
+    image_detector:
+      min_area_px: 250
+      max_area_px: 250000
+      min_circularity: 0.55
+      min_fill_ratio: 0.45
+      morph_kernel_size: 5
+
+    # =========================
+    # Kalman 1D cho sai so anh sau transform
+    # x: body x error, y: body y error
+    # =========================
+    image_kalman:
+      x:
+        q_acc: 0.04
+        r_pos: 0.02
+      y:
+        q_acc: 0.04
+        r_pos: 0.02
+      initial_position_var: 0.20
+      initial_velocity_var: 2.0
+      max_predict_dt: 0.20
+
+    # =========================
+    # Image servo velocity controller
+    # Controller chi nhan sai so XY da loc Kalman, don vi met.
+    # =========================
+    image_servo:
+      kp_x: 0.6
+      kp_y: 0.6
+      max_xy_velocity: 0.45
+      center_tolerance_m: 0.12
+      stable_hold_sec: 1.0
+      drop_delay_sec: 1.0
+      image_timeout_sec: 0.5
+
+      # Doi true neu test thuc te thay servo bi nguoc truc.
+      invert_x: false
+      invert_y: false
+
+      # Dung do cao hien tai de chieu optical ray xuong mat dat.
+      use_current_altitude_for_projection: true
+      fixed_projection_range_m: 3.0
+      min_projection_range_m: 0.3
+      max_projection_range_m: 10.0
+
+    # =========================
+    # Debug
+    # =========================
+    debug:
+      enable: true

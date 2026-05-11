@@ -35,12 +35,11 @@ private:
 		float bbox_h{0.0f};
 		float bbox_area{0.0f};
 		float visible_size{0.0f};
+		float circle_area_ratio{0.0f};
+		float radial_error{0.0f};
+		int approx_vertices{0};
 		std::vector<cv::Point> contour;
 	};
-
-	// ===== Body Kalman dimensions =====
-	static constexpr int kBodyKalmanStateDim = 6;
-	static constexpr int kBodyKalmanMeasDim = 3;
 
 	// ===== ROS callbacks =====
 	void loadParameters();
@@ -48,14 +47,23 @@ private:
 	void camera_info_callback(const sensor_msgs::msg::CameraInfo::SharedPtr msg);
 	void ring_detect_reset_callback(const std_msgs::msg::String::SharedPtr msg);
 
-	// ===== Body Kalman =====
-	void initBodyKalmanMatrices();
-	void initBodyKalman(const Eigen::Vector3d &measurement);
+	// ===== Single body-frame Kalman =====
+	// Chỉ dùng một cv::KalmanFilter duy nhất:
+	// state = [x, y, z, vx, vy, vz]^T
+	// measurement = [x, y, z]^T
+	// Measurement đầu vào là vị trí sau khi đổi từ camera optical frame sang body/drone frame.
+	// Quy ước body XYZ: x = phía trước drone, y = bên phải drone, z = xuống dưới.
+	void configureBodyKalman();
+	void initBodyKalman(const Eigen::Vector3d &body_measurement);
 	void predictBodyKalman(double dt_s);
-	void updateBodyKalman(const Eigen::Vector3d &measurement);
+	void updateBodyKalman(const Eigen::Vector3d &body_measurement);
 	void resetBodyKalman();
+	Eigen::Vector3d getBodyKalmanPosition() const;
+	Eigen::Vector3d getBodyKalmanVelocity() const;
 
-	Eigen::Vector3d cameraOpticalToFrontBody(const Eigen::Vector3d &camera_position) const;
+	Eigen::Vector3d cameraOpticalToBodyXyz(const Eigen::Vector3d &camera_position) const;
+	Eigen::Vector3d bodyXyzToCameraOptical(const Eigen::Vector3d &body_position) const;
+	bool projectBodyKalmanToImage(cv::Point2f &pixel, double &depth_z) const;
 
 	void publishCameraRawTarget(
 		const std_msgs::msg::Header &header,
@@ -63,9 +71,6 @@ private:
 		double camera_y,
 		double camera_z);
 
-	void publishBodyRawTarget(
-		const std_msgs::msg::Header &header,
-		const Eigen::Vector3d &body_raw);
 
 	void publishBodyFilteredTarget(const std_msgs::msg::Header &header);
 
@@ -78,7 +83,7 @@ private:
 	bool publishBodyTargetPredictionOnly(const std_msgs::msg::Header &header);
 
 	// ===== Detection =====
-	cv::Mat build_white_mask(const cv::Mat &bgr) const;
+	cv::Mat build_neutral_gray_mask(const cv::Mat &bgr) const;
 
 	cv::Mat make_color_detect_debug_image(
 		const cv::Mat &bgr_frame) const;
@@ -86,6 +91,13 @@ private:
 	cv::Mat make_side_by_side_debug_image(
 		const cv::Mat &left_image,
 		const cv::Mat &right_image) const;
+
+	cv::Mat make_labeled_debug_panel(
+		const cv::Mat &image,
+		const std::string &label) const;
+
+	cv::Mat make_pipeline_debug_image(
+		const cv::Mat &annotated_frame) const;
 
 	std::vector<RingCandidate> detect_ring_candidates(const cv::Mat &frame, cv::Mat &edges);
 	std::vector<RingCandidate> detect_ring_candidates_far(const cv::Mat &frame, cv::Mat &edges);
@@ -129,7 +141,6 @@ private:
 	std::string _ring_detect_reset_topic;
 
 	std::string _target_pose_camera_raw_topic;
-	std::string _target_error_body_raw_topic;
 	std::string _target_error_body_filtered_topic;
 	std::string _target_velocity_body_filtered_topic;
 
@@ -145,17 +156,76 @@ private:
 	double _param_aspect_min{0.30};
 	double _param_aspect_max{3.50};
 
-	// ===== White color mask / debug params =====
+	// ===== Neutral gray color mask / debug params =====
 	bool _param_use_white_mask{true};
 
 	// Dùng để bật/tắt khung bên phải trong ảnh /ring_detect/image_proc.
 	// true  : ảnh image_proc = detection debug + color detect debug
 	// false : ảnh image_proc chỉ có detection debug
-	bool _param_publish_color_detect_debug{true};
+	bool _param_publish_color_detect_debug{false};
 
-	int _param_white_s_max{45};
-	int _param_white_v_min{170};
+	// Bật/tắt publish ảnh /ring_detect/image_proc.
+	// false: node vẫn detect và publish data topic, nhưng không xuất ảnh để nhẹ CPU/network.
+	bool _param_publish_image{true};
+
+	// Bật ảnh debug nhiều lớp trên cùng /ring_detect/image_proc:
+	// annotated output, Y channel, neutral mask, detector input, Canny edge, contour overlay.
+	bool _param_publish_pipeline_debug{false};
+	bool _param_debug_draw_rejected_contours{true};
+	int _param_debug_panel_width{520};
+
+	// Với Canny edge, contour của vòng thường là viền mỏng nên area/circle_area có thể nhỏ.
+	// Tắt filter này sẽ giúp nhận vòng to/dày tốt hơn, vẫn lọc tròn bằng vertices/ellipse/radial_error.
+	bool _param_use_circle_area_ratio_filter{false};
+
+	// Ngưỡng BGR để nhận màu trung tính từ trắng tới xám đen, không dùng HSV.
+	// gray_min/gray_max: giới hạn độ sáng sau khi quy đổi gray từ BGR.
+	// gray_color_diff_max: chênh lệch max(B,G,R)-min(B,G,R) không được quá lớn.
+	int _param_gray_min{45};
+	int _param_gray_max{255};
+	int _param_gray_color_diff_max{55};
+	int _param_gray_morph_kernel{3};
+
+	// Detector kiểu YUV tham khảo: dùng Y cho sáng/tối, U/V gần 128 để giữ màu trung tính.
+	bool _param_use_yuv_neutral_mask{true};
+	int _param_yuv_u_center{128};
+	int _param_yuv_v_center{128};
+	int _param_yuv_uv_diff_max{35};
+	int _param_yuv_median_kernel{5};
+
+	// Giữ tên tham số cũ để YAML cũ không làm node lỗi khi load.
+	int _param_white_min{150};
+	int _param_white_color_diff_max{45};
 	int _param_white_morph_kernel{3};
+
+	// ===== Simple center-ring detection params =====
+	// Chỉ xử lý vùng gần tâm ảnh để giảm tải và tránh bắt nhầm nền ở rìa ảnh.
+	double _param_center_roi_ratio{0.70};
+	double _param_max_center_distance_ratio{0.42};
+	double _param_min_fill_ratio{0.12};
+	double _param_max_fill_ratio{1.25};
+
+	// Lọc hình tròn thật để loại hình vuông/trắng/xám gần tâm.
+	double _param_min_circle_area_ratio{0.72};
+	double _param_max_circle_area_ratio{1.20};
+	double _param_max_radial_error{0.20};
+	int _param_min_approx_vertices{8};
+	double _param_approx_epsilon_ratio{0.018};
+
+	// Detector cạnh kiểu tham khảo Python:
+	// neutral gray mask -> bilateral/blur nhẹ -> Canny -> contour -> approxPolyDP.
+	bool _param_use_canny_circle_detector{true};
+	bool _param_use_gray_binary_threshold{false};
+	int _param_gray_binary_threshold{45};
+	bool _param_use_bilateral_filter{true};
+	int _param_bilateral_d{5};
+	double _param_bilateral_sigma_color{175.0};
+	double _param_bilateral_sigma_space{175.0};
+	double _param_canny_low{75.0};
+	double _param_canny_high{200.0};
+	int _param_edge_dilate_kernel{3};
+	double _param_min_ellipse_axis_ratio{0.78};
+	double _param_max_ellipse_center_shift_ratio{0.18};
 
 	// ===== Far detection params =====
 	double _param_far_min_area{120.0};
@@ -178,22 +248,29 @@ private:
 
 	// ===== Hold / pass params =====
 	int _param_hold_max_missed{15};
-	double _param_pass_forward_thresh{0.35};
+	double _param_pass_x_thresh{0.35};
 	double _param_pass_min_visible_size{220.0};
 	double _param_body_kf_hold_timeout_s{0.30};
 	double _param_reset_timeout_s{0.50};
 
-	// ===== Front fixed camera transform params =====
+	// ===== Body XYZ transform params =====
 	double _param_camera_offset_x{0.09};
 	double _param_camera_offset_y{0.0};
 	double _param_camera_offset_z{0.0};
 
-	// ===== Body Kalman params =====
-	double _param_body_kf_q_pos{0.02};
-	double _param_body_kf_q_vel{0.10};
-	double _param_body_kf_r_x{0.04};
-	double _param_body_kf_r_y{0.02};
+	// ===== Single body-frame Kalman params =====
+	// q_acc là nhiễu gia tốc cho model vận tốc không đổi.
+	// r_* là phương sai nhiễu đo vị trí theo từng trục body XYZ.
+	// x = trước, y = phải, z = xuống.
+	double _param_body_kf_q_acc{0.80};
+	double _param_body_kf_r_x{0.02};
+	double _param_body_kf_r_y{0.04};
 	double _param_body_kf_r_z{0.02};
+
+	bool _param_track_use_kf_gate{true};
+	double _param_track_kf_pixel_gate_px{90.0};
+	double _param_track_kf_depth_ratio_gate{0.45};
+	bool _param_publish_reset_status{false};
 
 	// ===== Lock state =====
 	bool _locked{false};
@@ -208,16 +285,14 @@ private:
 	double _last_camera_x{0.0};
 	double _last_camera_y{0.0};
 	double _last_camera_z{0.0};
-	Eigen::Vector3d _last_body_raw{Eigen::Vector3d::Zero()};
-	bool _has_last_body_raw{false};
+	Eigen::Vector3d _last_body_filtered{Eigen::Vector3d::Zero()};
+	bool _has_last_body_filtered{false};
 
-	// ===== Body Kalman state =====
-	Eigen::Matrix<double, kBodyKalmanStateDim, 1> _body_kf_state;
-	Eigen::Matrix<double, kBodyKalmanStateDim, kBodyKalmanStateDim> _body_kf_P;
-	Eigen::Matrix<double, kBodyKalmanStateDim, kBodyKalmanStateDim> _body_kf_Q;
-	Eigen::Matrix<double, kBodyKalmanMeasDim, kBodyKalmanMeasDim> _body_kf_R;
-	Eigen::Matrix<double, kBodyKalmanMeasDim, kBodyKalmanStateDim> _body_kf_H;
+	// ===== Single body-frame Kalman state =====
+	cv::KalmanFilter _body_kf;
 	bool _body_kf_initialized{false};
+	Eigen::Vector3d _body_kf_position{Eigen::Vector3d::Zero()};
+	Eigen::Vector3d _body_kf_velocity{Eigen::Vector3d::Zero()};
 	rclcpp::Time _body_kf_last_time{0, 0, RCL_ROS_TIME};
 	rclcpp::Time _last_measurement_time{0, 0, RCL_ROS_TIME};
 
@@ -226,6 +301,15 @@ private:
 	cv::Point2f _far_candidate_center{0.0f, 0.0f};
 	float _far_candidate_size{0.0f};
 	int _far_candidate_count{0};
+
+	// ===== Pipeline debug cache =====
+	cv::Mat _debug_neutral_mask;
+	cv::Mat _debug_y_channel;
+	cv::Mat _debug_detector_binary;
+	cv::Mat _debug_edge;
+	cv::Mat _debug_candidate_overlay;
+	int _debug_raw_contour_count{0};
+	int _debug_accepted_candidate_count{0};
 
 	// ===== ROS interfaces =====
 	rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr _image_sub;
@@ -236,7 +320,6 @@ private:
 	rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr _target_valid_pub;
 	rclcpp::Publisher<std_msgs::msg::String>::SharedPtr _reset_status_pub;
 	rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr _target_pose_camera_raw_pub;
-	rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr _target_error_body_raw_pub;
 	rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr _target_error_body_filtered_pub;
 	rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr _target_velocity_body_filtered_pub;
 

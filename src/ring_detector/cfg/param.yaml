@@ -1,0 +1,168 @@
+ring_detector_node:
+  ros__parameters:
+    # =========================
+    # Topics
+    # =========================
+    image_topic: /camera_front/image_raw
+    camera_info_topic: /camera_front/camera_info
+    output_namespace: /ring_detect
+
+    # Output toi uu:
+    # - /ring_detect/target_pose_camera_raw: pose camera raw de debug/kiem tra.
+    # - /ring_detect/target_error_body_filtered: pose da doi sang body/drone frame roi loc bang mot Kalman duy nhat.
+    # - /ring_detect/target_velocity_body_filtered: van toc uoc luong tu Kalman duy nhat trong body/drone frame.
+    # Khong publish /ring_detect/target_error_body_raw nua de tranh dung nham du lieu chua loc.
+    processed_image_topic: ""                  # default: /ring_detect/image_proc
+    target_valid_topic: ""                     # default: /ring_detect/target_valid
+    target_pose_camera_raw_topic: ""           # default: /ring_detect/target_pose_camera_raw
+    target_error_body_filtered_topic: ""       # default: /ring_detect/target_error_body_filtered
+    target_velocity_body_filtered_topic: ""    # default: /ring_detect/target_velocity_body_filtered
+
+    # Reset input don gian cho node dieu khien kich reset.
+    # Lenh: ros2 topic pub --once /ring_detect/reset std_msgs/msg/String "{data: 'RESET'}"
+    ring_detect_reset_topic: /ring_detect/reset
+
+    # false: khong tao /ring_detect/reset_status de gon topic.
+    # true : publish ACTIVE/RESET neu ban can debug trang thai reset.
+    publish_reset_status: false
+    reset_status_topic: ""                     # default neu bat: /ring_detect/reset_status
+
+    target_frame_id: camera_front_optical_frame
+    body_frame_id: base_link_frd
+
+    # =========================
+    # Image output / debug
+    # =========================
+    publish_image: true
+    publish_pipeline_debug: true
+    publish_color_detect_debug: false
+    debug_draw_rejected_contours: true
+    debug_panel_width: 520
+
+    # =========================
+    # Real ring size
+    # =========================
+    ring_diameter_m: 1.6
+
+    # =========================
+    # Neutral gray / YUV detector
+    # =========================
+    use_yuv_neutral_mask: true
+    gray_min: 15
+    gray_max: 255
+    gray_color_diff_max: 80
+    gray_morph_kernel: 3
+
+    yuv_u_center: 128
+    yuv_v_center: 128
+    yuv_uv_diff_max: 38
+    yuv_median_kernel: 5
+
+    # =========================
+    # Center ROI
+    # =========================
+    center_roi_ratio: 1.00
+    max_center_distance_ratio: 0.70
+
+    # =========================
+    # Shape filter: bat buoc la hinh tron
+    # =========================
+    min_area: 80.0
+    min_radius_px: 8.0
+    min_visible_size: 20.0
+
+    circularity_min: 0.10
+    aspect_min: 0.75
+    aspect_max: 1.33
+
+    min_circle_area_ratio: 0.72
+    max_circle_area_ratio: 1.20
+    use_circle_area_ratio_filter: false
+
+    max_radial_error: 0.28
+    min_approx_vertices: 7
+    approx_epsilon_ratio: 0.010
+
+    # =========================
+    # Canny circle detector
+    # =========================
+    use_canny_circle_detector: true
+    use_gray_binary_threshold: false
+    gray_binary_threshold: 45
+
+    use_bilateral_filter: true
+    bilateral_d: 5
+    bilateral_sigma_color: 175.0
+    bilateral_sigma_space: 175.0
+
+    canny_low: 75.0
+    canny_high: 200.0
+    edge_dilate_kernel: 3
+
+    min_ellipse_axis_ratio: 0.70
+    max_ellipse_center_shift_ratio: 0.25
+
+    min_fill_ratio: 0.12
+    max_fill_ratio: 1.25
+
+    # =========================
+    # Lock / hold / anti-jump
+    # =========================
+    # Khi da lock vong, node se khong tu chon vong moi bang select_main_ring.
+    # Neu mat vong, Single Body Kalman se hold ngan han. Muon doi sang vong khac thi node dieu khien publish RESET.
+    lock_max_dist: 140.0
+    lock_min_size_ratio: 0.45
+    hold_max_missed: 60
+    max_lock_missed: 60
+    body_kf_hold_timeout_s: 1.5
+    reset_timeout_s: 1.6
+
+    # Gate theo du doan Single Body Kalman chieu nguoc ve khung anh de tranh nhay qua vong ke ben.
+    track_use_kf_gate: true
+    track_kf_pixel_gate_px: 90.0
+    track_kf_depth_ratio_gate: 0.45
+
+    # Khi UAV da di qua gan / vong qua lon thi reset lock noi bo.
+    pass_x_thresh: 0.35
+    pass_min_visible_size: 220.0
+
+    # =========================
+    # Camera to body transform
+    # =========================
+    camera_offset_x: 0.09
+    camera_offset_y: 0.0
+    camera_offset_z: 0.0
+
+    # =========================
+    # Single body-frame Kalman filter
+    # =========================
+    # Chi con 1 bo cv::KalmanFilter duy nhat.
+    # State: [x, y, z, vx, vy, vz].
+    # Measurement: [x, y, z].
+    # Quy uoc body XYZ: x = phia truoc drone, y = ben phai drone, z = xuong duoi.
+    # Input: pose camera raw -> doi sang body/drone frame -> cap nhat Kalman.
+    # Output dieu khien: /ring_detect/target_error_body_filtered.
+    #
+    # body_kf_q_acc:
+    # - lon hon: bam nhanh hon khi vong di chuyen/anh rung, nhung nhieu hon.
+    # - nho hon: muot hon, nhung tre hon.
+    #
+    # body_kf_r_* la phuong sai cua phep do vi tri theo tung truc body XYZ.
+    # - lon hon: tin measurement it hon, output muot hon.
+    # - nho hon: tin measurement nhieu hon, output nhay nhanh hon.
+    body_kf_q_acc: 0.80
+    body_kf_r_x: 0.02
+    body_kf_r_y: 0.04
+    body_kf_r_z: 0.02
+
+    # =========================
+    # Legacy compatibility
+    # =========================
+    use_white_mask: true
+    white_min: 150
+    white_color_diff_max: 45
+    white_morph_kernel: 3
+    far_confirm_frames: 1
+
+    # Giu topic raw neu file launch/cu phu thuoc, nhung logic Kalman moi khong dung topic nay.
+    target_error_body_raw_topic: ""

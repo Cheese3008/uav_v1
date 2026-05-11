@@ -2,202 +2,222 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <memory>
 #include <optional>
-#include <string>
 
 #include <px4_msgs/msg/vehicle_local_position.hpp>
+#include <px4_ros2/components/mode.hpp>
 #include <px4_ros2/components/node_with_mode.hpp>
+#include <px4_ros2/control/setpoint_types/experimental/trajectory.hpp>
 
 namespace
 {
 constexpr char kVehicleAttitudeTopic[] = "/fmu/out/vehicle_attitude";
 constexpr char kVehicleLocalPositionTopic[] = "/fmu/out/vehicle_local_position";
-constexpr char kTargetErrorFusionTopic[] = "/ring_pass/target_error_body_filtered";
-constexpr char kTargetVelocityFusionTopic[] = "/ring_pass/target_vel_body_filtered";
+
+// Output hiện tại của RingDetector:
+// PoseStamped.position = [x, y, z] trong body/drone frame.
+constexpr char kTargetBodyPositionTopic[] = "/ring_detect/target_error_body_filtered";
+constexpr char kTargetBodyVelocityTopic[] = "/ring_detect/target_velocity_body_filtered";
+constexpr char kTargetValidTopic[] = "/ring_detect/target_valid";
 constexpr char kRingDetectResetTopic[] = "/ring_detect/reset";
 
-const std::string kModeName = "RingPassMode";
+constexpr char kModeName[] = "RingPassMode";
 constexpr bool kEnableDebugOutput = true;
 }
 
-class MissionNode : public px4_ros2::ModeBase
-{
-public:
-    explicit MissionNode(rclcpp::Node& node);
-
-    void onActivate() override;
-    void onDeactivate() override;
-    void updateSetpoint(float dt_s) override;
-
-private:
-    enum class RingModeState
-    {
-        WAIT_LOCAL_POSITION = 0,
-        WAIT_RING_TARGET,
-        RING_PASS,
-        FINISHED
-    };
-
-private:
-    void loadParameters();
-    void setupInterfaces();
-    void vehicleLocalPositionCallback(const px4_msgs::msg::VehicleLocalPosition::SharedPtr msg);
-    void enterState(RingModeState newState);
-    void publishHoldPosition();
-    void publishVelocitySetpoint(const Eigen::Vector3f& velocityNed);
-    float sanitizeDt(float dtSec) const;
-    const char* ringModeStateToString(RingModeState state) const;
-
-private:
-    rclcpp::Node& node_;
-    RingPassController ringPassController_;
-
-    std::shared_ptr<px4_ros2::TrajectorySetpointType> trajectorySetpoint_;
-    rclcpp::Subscription<px4_msgs::msg::VehicleLocalPosition>::SharedPtr vehicleLocalPositionSub_;
-
-    rclcpp::Time stateEnterTime_{0, 0, RCL_ROS_TIME};
-
-    Eigen::Vector3f currentPosition_{0.0f, 0.0f, 0.0f};
-    float currentYaw_{0.0f};
-    bool hasVehicleLocalPosition_{false};
-
-    RingModeState state_{RingModeState::WAIT_LOCAL_POSITION};
-    bool stateFirstTick_{true};
-
-    float paramDtMinSec_{0.005f};
-    float paramDtMaxSec_{0.10f};
-};
-
 RingPassController::RingPassController(rclcpp::Node& node)
-    : node_(node)
+    : ModeBase(node, px4_ros2::ModeBase::Settings{std::string(kModeName)})
+    , node_(node)
 {
-    vehicle_attitude_sub_ =
-        node_.create_subscription<px4_msgs::msg::VehicleAttitude>(
-            kVehicleAttitudeTopic,
-            rclcpp::QoS(10).best_effort(),
-            std::bind(&RingPassController::vehicleAttitudeCallback, this, std::placeholders::_1));
+    trajectorySetpoint_ = std::make_shared<px4_ros2::TrajectorySetpointType>(*this);
 
-    target_error_sub_ =
-        node_.create_subscription<geometry_msgs::msg::PoseStamped>(
-            kTargetErrorFusionTopic,
-            rclcpp::QoS(1).best_effort(),
-            std::bind(&RingPassController::targetErrorCallback, this, std::placeholders::_1));
+    vehicleLocalPositionSub_ = node_.create_subscription<px4_msgs::msg::VehicleLocalPosition>(
+        kVehicleLocalPositionTopic,
+        rclcpp::QoS(10).best_effort(),
+        std::bind(&RingPassController::vehicleLocalPositionCallback, this, std::placeholders::_1));
 
-    target_velocity_sub_ =
-        node_.create_subscription<geometry_msgs::msg::TwistStamped>(
-            kTargetVelocityFusionTopic,
-            rclcpp::QoS(1).best_effort(),
-            std::bind(&RingPassController::targetVelocityCallback, this, std::placeholders::_1));
+    vehicleAttitudeSub_ = node_.create_subscription<px4_msgs::msg::VehicleAttitude>(
+        kVehicleAttitudeTopic,
+        rclcpp::QoS(10).best_effort(),
+        std::bind(&RingPassController::vehicleAttitudeCallback, this, std::placeholders::_1));
 
-    ring_detect_reset_pub_ =
-        node_.create_publisher<std_msgs::msg::String>(
-            kRingDetectResetTopic,
-            rclcpp::QoS(10).reliable());
+    targetPositionSub_ = node_.create_subscription<geometry_msgs::msg::PoseStamped>(
+        kTargetBodyPositionTopic,
+        rclcpp::QoS(1).best_effort(),
+        std::bind(&RingPassController::targetPositionCallback, this, std::placeholders::_1));
+
+    targetVelocitySub_ = node_.create_subscription<geometry_msgs::msg::TwistStamped>(
+        kTargetBodyVelocityTopic,
+        rclcpp::QoS(1).best_effort(),
+        std::bind(&RingPassController::targetVelocityCallback, this, std::placeholders::_1));
+
+    targetValidSub_ = node_.create_subscription<std_msgs::msg::Bool>(
+        kTargetValidTopic,
+        rclcpp::QoS(1).best_effort(),
+        std::bind(&RingPassController::targetValidCallback, this, std::placeholders::_1));
+
+    detectorResetPub_ = node_.create_publisher<std_msgs::msg::String>(
+        kRingDetectResetTopic,
+        rclcpp::QoS(10).reliable());
 
     loadParameters();
+
+    modeRequirements().manual_control = false;
+    stateEnterTime_ = node_.now();
+
     reset();
+
+    RCLCPP_INFO(node_.get_logger(), "[RingPassMode] external mode created. Mode=%s", kModeName);
 }
 
 void RingPassController::loadParameters()
 {
-    node_.declare_parameter<float>("target_timeout", 0.3f);
+    node_.declare_parameter<double>("target_timeout", targetTimeoutSec_);
+    node_.declare_parameter<double>("detector_reset_ignore_time", detectorResetIgnoreTimeSec_);
+    node_.declare_parameter<double>("ringpass_min_time_before_finish", minTimeBeforeFinishSec_);
+    node_.declare_parameter<double>("ringpass_min_forward_cmd_before_finish", minForwardCmdBeforeFinishMps_);
+    node_.declare_parameter<double>("ring_mode_dt_min_sec", dtMinSec_);
+    node_.declare_parameter<double>("ring_mode_dt_max_sec", dtMaxSec_);
 
-    node_.declare_parameter<float>("ringpass_kp_lat", 0.8f);
-    node_.declare_parameter<float>("ringpass_kd_lat", 0.0f);
+    node_.declare_parameter<double>("ringpass_kp_y", kpY_);
+    node_.declare_parameter<double>("ringpass_kd_y", kdY_);
+    node_.declare_parameter<double>("ringpass_kp_z", kpZ_);
+    node_.declare_parameter<double>("ringpass_kd_z", kdZ_);
 
-    node_.declare_parameter<float>("ringpass_kp_z", 0.8f);
-    node_.declare_parameter<float>("ringpass_kd_z", 0.0f);
+    node_.declare_parameter<double>("ringpass_y_deadband", yDeadbandM_);
+    node_.declare_parameter<double>("ringpass_z_deadband", zDeadbandM_);
 
-    node_.declare_parameter<float>("ringpass_lat_deadband", 0.03f);
-    node_.declare_parameter<float>("ringpass_z_deadband", 0.04f);
+    node_.declare_parameter<double>("ringpass_vy_max", vyMaxMps_);
+    node_.declare_parameter<double>("ringpass_vz_max", vzMaxMps_);
 
-    node_.declare_parameter<float>("ringpass_v_forward_min", 1.5f);
-    node_.declare_parameter<float>("ringpass_v_forward_max", 2.0f);
-    node_.declare_parameter<float>("ringpass_r_approach", 0.35f);
-    node_.declare_parameter<float>("ringpass_r_forward_full", 0.10f);
-    node_.declare_parameter<float>("ringpass_klog_forward", 8.0f);
+    node_.declare_parameter<double>("ringpass_vx_min", vxMinMps_);
+    node_.declare_parameter<double>("ringpass_vx_max", vxMaxMps_);
+    node_.declare_parameter<double>("ringpass_yz_approach_radius", yzApproachRadiusM_);
+    node_.declare_parameter<double>("ringpass_yz_full_speed_radius", yzFullSpeedRadiusM_);
+    node_.declare_parameter<double>("ringpass_x_speed_curve_gain", xSpeedCurveGain_);
 
-    node_.declare_parameter<float>("ringpass_v_lateral_max", 1.2f);
-    node_.declare_parameter<float>("ringpass_v_vertical_max", 0.7f);
+    node_.declare_parameter<double>("ringpass_target_z_offset", targetZOffsetM_);
 
-    node_.declare_parameter<float>("ringpass_slew_xy", 1.5f);
-    node_.declare_parameter<float>("ringpass_slew_z", 1.2f);
+    node_.declare_parameter<double>("ringpass_slew_xy", slewXyMps2_);
+    node_.declare_parameter<double>("ringpass_slew_z", slewZMps2_);
 
-    node_.declare_parameter<float>("ringpass_height_offset", 0.40f);
-    node_.declare_parameter<float>("ringpass_finish_forward_error", 0.05f);
+    node_.get_parameter("target_timeout", targetTimeoutSec_);
+    node_.get_parameter("detector_reset_ignore_time", detectorResetIgnoreTimeSec_);
+    node_.get_parameter("ringpass_min_time_before_finish", minTimeBeforeFinishSec_);
+    node_.get_parameter("ringpass_min_forward_cmd_before_finish", minForwardCmdBeforeFinishMps_);
+    node_.get_parameter("ring_mode_dt_min_sec", dtMinSec_);
+    node_.get_parameter("ring_mode_dt_max_sec", dtMaxSec_);
 
-    node_.get_parameter("target_timeout", param_target_timeout_);
+    node_.get_parameter("ringpass_kp_y", kpY_);
+    node_.get_parameter("ringpass_kd_y", kdY_);
+    node_.get_parameter("ringpass_kp_z", kpZ_);
+    node_.get_parameter("ringpass_kd_z", kdZ_);
 
-    node_.get_parameter("ringpass_kp_lat", param_kp_lat_);
-    node_.get_parameter("ringpass_kd_lat", param_kd_lat_);
+    node_.get_parameter("ringpass_y_deadband", yDeadbandM_);
+    node_.get_parameter("ringpass_z_deadband", zDeadbandM_);
 
-    node_.get_parameter("ringpass_kp_z", param_kp_z_);
-    node_.get_parameter("ringpass_kd_z", param_kd_z_);
+    node_.get_parameter("ringpass_vy_max", vyMaxMps_);
+    node_.get_parameter("ringpass_vz_max", vzMaxMps_);
 
-    node_.get_parameter("ringpass_lat_deadband", param_lat_deadband_);
-    node_.get_parameter("ringpass_z_deadband", param_z_deadband_);
+    node_.get_parameter("ringpass_vx_min", vxMinMps_);
+    node_.get_parameter("ringpass_vx_max", vxMaxMps_);
+    node_.get_parameter("ringpass_yz_approach_radius", yzApproachRadiusM_);
+    node_.get_parameter("ringpass_yz_full_speed_radius", yzFullSpeedRadiusM_);
+    node_.get_parameter("ringpass_x_speed_curve_gain", xSpeedCurveGain_);
 
-    node_.get_parameter("ringpass_v_forward_min", param_v_forward_min_);
-    node_.get_parameter("ringpass_v_forward_max", param_v_forward_max_);
-    node_.get_parameter("ringpass_r_approach", param_r_approach_);
-    node_.get_parameter("ringpass_r_forward_full", param_r_forward_full_);
-    node_.get_parameter("ringpass_klog_forward", param_klog_forward_);
+    node_.get_parameter("ringpass_target_z_offset", targetZOffsetM_);
 
-    node_.get_parameter("ringpass_v_lateral_max", param_v_lateral_max_);
-    node_.get_parameter("ringpass_v_vertical_max", param_v_vertical_max_);
+    node_.get_parameter("ringpass_slew_xy", slewXyMps2_);
+    node_.get_parameter("ringpass_slew_z", slewZMps2_);
 
-    node_.get_parameter("ringpass_slew_xy", param_slew_xy_);
-    node_.get_parameter("ringpass_slew_z", param_slew_z_);
+    targetTimeoutSec_ = std::max(targetTimeoutSec_, 0.01);
+    detectorResetIgnoreTimeSec_ = std::max(detectorResetIgnoreTimeSec_, 0.0);
+    minTimeBeforeFinishSec_ = std::max(minTimeBeforeFinishSec_, 0.0);
+    minForwardCmdBeforeFinishMps_ = std::max(minForwardCmdBeforeFinishMps_, 0.0);
+    dtMinSec_ = std::max(dtMinSec_, 1e-3);
+    dtMaxSec_ = std::max(dtMaxSec_, dtMinSec_);
 
-    node_.get_parameter("ringpass_height_offset", param_height_offset_);
-    node_.get_parameter("ringpass_finish_forward_error", param_finish_forward_error_);
+    yDeadbandM_ = std::max(yDeadbandM_, 0.0);
+    zDeadbandM_ = std::max(zDeadbandM_, 0.0);
 
-    param_r_approach_ = std::max(param_r_approach_, param_r_forward_full_ + 1e-3f);
-    param_v_forward_max_ = std::max(param_v_forward_max_, param_v_forward_min_);
-    param_klog_forward_ = std::max(param_klog_forward_, 1e-3f);
+    vyMaxMps_ = std::max(vyMaxMps_, 0.0);
+    vzMaxMps_ = std::max(vzMaxMps_, 0.0);
+
+    vxMinMps_ = std::max(vxMinMps_, 0.0);
+    vxMaxMps_ = std::max(vxMaxMps_, vxMinMps_);
+    yzFullSpeedRadiusM_ = std::max(yzFullSpeedRadiusM_, 0.0);
+    yzApproachRadiusM_ = std::max(yzApproachRadiusM_, yzFullSpeedRadiusM_ + 1e-3);
+    xSpeedCurveGain_ = std::max(xSpeedCurveGain_, 1e-3);
+
+    slewXyMps2_ = std::max(slewXyMps2_, 0.0);
+    slewZMps2_ = std::max(slewZMps2_, 0.0);
+    RCLCPP_INFO(
+        node_.get_logger(),
+        "[RingPassController] input body XYZ topic=%s velocity=%s valid=%s",
+        kTargetBodyPositionTopic,
+        kTargetBodyVelocityTopic,
+        kTargetValidTopic);
 }
 
 void RingPassController::publishDetectorReset()
 {
-    if (!ring_detect_reset_pub_) {
+    if (!detectorResetPub_)
+    {
         return;
     }
 
     std_msgs::msg::String msg;
-    msg.data = "RESET";
-    ring_detect_reset_pub_->publish(msg);
+    msg.data = "reset";
+    detectorResetPub_->publish(msg);
+
+    ignoreTargetUntil_ = node_.now() + rclcpp::Duration::from_seconds(detectorResetIgnoreTimeSec_);
 
     RCLCPP_WARN(
         node_.get_logger(),
-        "[RingPassController] publish /ring_detect/reset = RESET");
+        "[RingPassController] reset RingDetector lock/Kalman, ignore target for %.2f s",
+        detectorResetIgnoreTimeSec_);
 }
 
 void RingPassController::reset()
 {
-    vx_last_ = 0.0f;
-    vy_last_ = 0.0f;
-    vz_last_ = 0.0f;
+    vxLastNed_ = 0.0;
+    vyLastNed_ = 0.0;
+    vzLastNed_ = 0.0;
+    target_ = BodyTarget{};
+    targetValidReceived_ = false;
+    targetValidExternal_ = false;
+    hasForwardCommandedInPass_ = false;
+    completedReported_ = false;
 
-    finished_ = false;
-    target_.valid = false;
-    target_.velocity = Eigen::Vector3f::Zero();
     publishDetectorReset();
 }
 
 void RingPassController::vehicleAttitudeCallback(
     const px4_msgs::msg::VehicleAttitude::SharedPtr msg)
 {
-    vehicle_attitude_msg_ = *msg;
-    has_vehicle_attitude_ = true;
+    vehicleAttitudeMsg_ = *msg;
+    hasVehicleAttitude_ = true;
 }
 
-void RingPassController::targetErrorCallback(
+void RingPassController::targetPositionCallback(
     const geometry_msgs::msg::PoseStamped::SharedPtr msg)
 {
-    target_.value.x() = static_cast<float>(msg->pose.position.x);
-    target_.value.y() = static_cast<float>(msg->pose.position.y);
-    target_.value.z() = static_cast<float>(msg->pose.position.z);
+    if (node_.now() < ignoreTargetUntil_)
+    {
+        return;
+    }
+
+    if (targetValidReceived_ && !targetValidExternal_)
+    {
+        target_.valid = false;
+        return;
+    }
+
+    target_.positionXyz.x() = msg->pose.position.x;
+    target_.positionXyz.y() = msg->pose.position.y;
+    target_.positionXyz.z() = msg->pose.position.z;
 
     target_.stamp = (msg->header.stamp.sec == 0 && msg->header.stamp.nanosec == 0)
         ? node_.now()
@@ -209,24 +229,62 @@ void RingPassController::targetErrorCallback(
 void RingPassController::targetVelocityCallback(
     const geometry_msgs::msg::TwistStamped::SharedPtr msg)
 {
-    target_.velocity.x() = static_cast<float>(msg->twist.linear.x);
-    target_.velocity.y() = static_cast<float>(msg->twist.linear.y);
-    target_.velocity.z() = static_cast<float>(msg->twist.linear.z);
+    if (node_.now() < ignoreTargetUntil_)
+    {
+        return;
+    }
+
+    target_.velocityXyz.x() = msg->twist.linear.x;
+    target_.velocityXyz.y() = msg->twist.linear.y;
+    target_.velocityXyz.z() = msg->twist.linear.z;
+}
+
+void RingPassController::targetValidCallback(
+    const std_msgs::msg::Bool::SharedPtr msg)
+{
+    targetValidReceived_ = true;
+    targetValidExternal_ = msg->data;
+
+    if (!msg->data)
+    {
+        target_.valid = false;
+    }
+}
+
+void RingPassController::vehicleLocalPositionCallback(
+    const px4_msgs::msg::VehicleLocalPosition::SharedPtr msg)
+{
+    currentPositionNed_.x() = msg->x;
+    currentPositionNed_.y() = msg->y;
+    currentPositionNed_.z() = msg->z;
+    currentYawRad_ = msg->heading;
+    hasVehicleLocalPosition_ = true;
 }
 
 bool RingPassController::attitudeReady() const
 {
-    return has_vehicle_attitude_;
+    return hasVehicleAttitude_;
 }
 
 bool RingPassController::targetTimedOut() const
 {
-    if (!target_.valid) {
+    if (node_.now() < ignoreTargetUntil_)
+    {
         return true;
     }
 
-    const double age_s = (node_.now() - target_.stamp).seconds();
-    return age_s > static_cast<double>(param_target_timeout_);
+    if (targetValidReceived_ && !targetValidExternal_)
+    {
+        return true;
+    }
+
+    if (!target_.valid)
+    {
+        return true;
+    }
+
+    const double ageSec = (node_.now() - target_.stamp).seconds();
+    return ageSec > targetTimeoutSec_;
 }
 
 bool RingPassController::isReady() const
@@ -239,198 +297,168 @@ bool RingPassController::hasValidTarget() const
     return !targetTimedOut();
 }
 
-bool RingPassController::isFinished() const
+
+double RingPassController::vehicleYawRad() const
 {
-    return finished_;
+    const auto& q = vehicleAttitudeMsg_.q;
+
+    const double w = q[0];
+    const double x = q[1];
+    const double y = q[2];
+    const double z = q[3];
+
+    const double sinyCosp = 2.0 * (w * z + x * y);
+    const double cosyCosp = 1.0 - 2.0 * (y * y + z * z);
+
+    return std::atan2(sinyCosp, cosyCosp);
 }
 
-float RingPassController::getVehicleYaw() const
+double RingPassController::applySlew(
+    double command,
+    double previous,
+    double accelerationLimit,
+    double dtSec) const
 {
-    const auto& q = vehicle_attitude_msg_.q;
-
-    const float w = q[0];
-    const float x = q[1];
-    const float y = q[2];
-    const float z = q[3];
-
-    const float siny_cosp = 2.0f * (w * z + x * y);
-    const float cosy_cosp = 1.0f - 2.0f * (y * y + z * z);
-
-    return std::atan2(siny_cosp, cosy_cosp);
+    const double safeDtSec = std::max(dtSec, 1e-3);
+    const double maxDelta = accelerationLimit * safeDtSec;
+    const double delta = std::clamp(command - previous, -maxDelta, maxDelta);
+    return previous + delta;
 }
 
-float RingPassController::applySlew(float cmd, float prev, float accel_limit, float dt_s) const
+double RingPassController::computeBodyVelocityX(double yzErrorRadius) const
 {
-    const float dt = std::max(dt_s, 1e-3f);
-    const float max_delta = accel_limit * dt;
-    const float delta = std::clamp(cmd - prev, -max_delta, max_delta);
-    return prev + delta;
-}
-
-float RingPassController::computeForwardVelocity(float center_error) const
-{
-    if (center_error > param_r_approach_) {
-        return 0.0f;
+    if (yzErrorRadius > yzApproachRadiusM_)
+    {
+        return 0.0;
     }
 
-    const float r = std::min(center_error, param_r_approach_);
-    const float denom = std::log1p(param_klog_forward_ * param_r_approach_);
+    const double radius = std::min(yzErrorRadius, yzApproachRadiusM_);
+    const double denom = std::log1p(xSpeedCurveGain_ * yzApproachRadiusM_);
 
-    float f = 1.0f - (
-        std::log1p(param_klog_forward_ * r) /
-        std::max(denom, 1e-6f)
-    );
-    f = std::clamp(f, 0.0f, 1.0f);
+    double ratio = 1.0 -
+        (std::log1p(xSpeedCurveGain_ * radius) / std::max(denom, 1e-6));
 
-    return param_v_forward_min_ + (param_v_forward_max_ - param_v_forward_min_) * f;
+    ratio = std::clamp(ratio, 0.0, 1.0);
+    return vxMinMps_ + (vxMaxMps_ - vxMinMps_) * ratio;
 }
 
-Eigen::Vector2f RingPassController::bodyToWorldXY(const Eigen::Vector2f& body_xy, float yaw) const
+Eigen::Vector2d RingPassController::bodyXyToNedXy(
+    const Eigen::Vector2d& velocityBodyXy,
+    double yawRad) const
 {
-    const float c = std::cos(yaw);
-    const float s = std::sin(yaw);
+    const double cosYaw = std::cos(yawRad);
+    const double sinYaw = std::sin(yawRad);
 
-    Eigen::Vector2f world_xy;
-    world_xy.x() = c * body_xy.x() - s * body_xy.y();
-    world_xy.y() = s * body_xy.x() + c * body_xy.y();
-    return world_xy;
+    Eigen::Vector2d velocityNedXy;
+    velocityNedXy.x() = cosYaw * velocityBodyXy.x() - sinYaw * velocityBodyXy.y();
+    velocityNedXy.y() = sinYaw * velocityBodyXy.x() + cosYaw * velocityBodyXy.y();
+
+    return velocityNedXy;
 }
 
-Eigen::Vector3f RingPassController::computeVelocityCommand(float dt_s)
+Eigen::Vector3f RingPassController::computeVelocityCommand(double dtSec)
 {
-    const float err_forward = target_.value.x();
-    const float err_lateral = target_.value.y();
-    const float err_down = target_.value.z() - param_height_offset_;
+    // RingDetector hiện tại publish vị trí tương đối body XYZ:
+    // x > 0: vòng ở phía trước drone.
+    // y > 0: vòng lệch sang phải drone.
+    // z > 0: vòng lệch xuống dưới drone.
+    const double errorX = target_.positionXyz.x();
+    const double errorY = target_.positionXyz.y();
+    const double errorZ = target_.positionXyz.z() - targetZOffsetM_;
 
-    const float vel_lateral_rel = target_.velocity.y();
-    const float vel_down_rel = target_.velocity.z();
+    const double velocityY = target_.velocityXyz.y();
+    const double velocityZ = target_.velocityXyz.z();
 
-    const float center_error = std::sqrt(err_lateral * err_lateral + err_down * err_down);
+    const double yzErrorRadius = std::hypot(errorY, errorZ);
 
-    float vx_body_cmd = computeForwardVelocity(center_error);
-    if (err_forward < 0.0f) {
-        vx_body_cmd = 0.0f;
+    const double vxBodyCmd = computeBodyVelocityX(yzErrorRadius);
+    if (state_ == RingModeState::RingPass && vxBodyCmd >= minForwardCmdBeforeFinishMps_)
+    {
+        hasForwardCommandedInPass_ = true;
     }
 
-    float vy_body_cmd = param_kp_lat_ * err_lateral - param_kd_lat_ * vel_lateral_rel;
-    if (std::abs(err_lateral) < param_lat_deadband_) {
-        vy_body_cmd = -param_kd_lat_ * vel_lateral_rel;
+    double vyBodyCmd = kpY_ * errorY - kdY_ * velocityY;
+    if (std::abs(errorY) < yDeadbandM_)
+    {
+        vyBodyCmd = -kdY_ * velocityY;
     }
-    vy_body_cmd = std::clamp(vy_body_cmd, -param_v_lateral_max_, param_v_lateral_max_);
+    vyBodyCmd = std::clamp(vyBodyCmd, -vyMaxMps_, vyMaxMps_);
 
-    float vz_cmd = param_kp_z_ * err_down - param_kd_z_ * vel_down_rel;
-    if (std::abs(err_down) < param_z_deadband_) {
-        vz_cmd = -param_kd_z_ * vel_down_rel;
+    double vzNedCmd = kpZ_ * errorZ - kdZ_ * velocityZ;
+    if (std::abs(errorZ) < zDeadbandM_)
+    {
+        vzNedCmd = -kdZ_ * velocityZ;
     }
-    vz_cmd = std::clamp(vz_cmd, -param_v_vertical_max_, param_v_vertical_max_);
+    vzNedCmd = std::clamp(vzNedCmd, -vzMaxMps_, vzMaxMps_);
 
-    const float yaw_now = getVehicleYaw();
-    const Eigen::Vector2f world_xy =
-        bodyToWorldXY(Eigen::Vector2f(vx_body_cmd, vy_body_cmd), yaw_now);
+    const Eigen::Vector2d velocityNedXy =
+        bodyXyToNedXy(Eigen::Vector2d(vxBodyCmd, vyBodyCmd), vehicleYawRad());
 
-    vx_last_ = applySlew(world_xy.x(), vx_last_, param_slew_xy_, dt_s);
-    vy_last_ = applySlew(world_xy.y(), vy_last_, param_slew_xy_, dt_s);
-    vz_last_ = applySlew(vz_cmd, vz_last_, param_slew_z_, dt_s);
+    vxLastNed_ = applySlew(velocityNedXy.x(), vxLastNed_, slewXyMps2_, dtSec);
+    vyLastNed_ = applySlew(velocityNedXy.y(), vyLastNed_, slewXyMps2_, dtSec);
+    vzLastNed_ = applySlew(vzNedCmd, vzLastNed_, slewZMps2_, dtSec);
 
-    if (err_forward <= param_finish_forward_error_) {
-        finished_ = true;
-    }
-
-    return Eigen::Vector3f(vx_last_, vy_last_, vz_last_);
-}
-
-Eigen::Vector3f RingPassController::computeHoldCommand(float dt_s)
-{
-    vx_last_ = applySlew(0.0f, vx_last_, param_slew_xy_, dt_s);
-    vy_last_ = applySlew(0.0f, vy_last_, param_slew_xy_, dt_s);
-    vz_last_ = applySlew(0.0f, vz_last_, param_slew_z_, dt_s);
-
-    return Eigen::Vector3f(vx_last_, vy_last_, vz_last_);
-}
-
-Eigen::Vector3f RingPassController::update(float dt_s)
-{
-    if (!attitudeReady() || targetTimedOut() || finished_) {
-        return computeHoldCommand(dt_s);
-    }
-
-    return computeVelocityCommand(dt_s);
-}
-
-MissionNode::MissionNode(rclcpp::Node& node)
-    : ModeBase(node, kModeName)
-    , node_(node)
-    , ringPassController_(node)
-{
-    loadParameters();
-    setupInterfaces();
-
-    trajectorySetpoint_ =
-        std::make_shared<px4_ros2::TrajectorySetpointType>(*this);
-
-    modeRequirements().manual_control = false;
-    stateEnterTime_ = node_.now();
-
-    RCLCPP_INFO(node_.get_logger(), "[RingPassMode] external mode created");
-}
-
-void MissionNode::loadParameters()
-{
-    node_.declare_parameter<float>("ring_mode_dt_min_sec", 0.005f);
-    node_.declare_parameter<float>("ring_mode_dt_max_sec", 0.10f);
-
-    node_.get_parameter("ring_mode_dt_min_sec", paramDtMinSec_);
-    node_.get_parameter("ring_mode_dt_max_sec", paramDtMaxSec_);
-
-    paramDtMinSec_ = std::max(paramDtMinSec_, 1e-3f);
-    paramDtMaxSec_ = std::max(paramDtMaxSec_, paramDtMinSec_);
-
-    RCLCPP_INFO(
+    RCLCPP_INFO_THROTTLE(
         node_.get_logger(),
-        "[RingPassMode] params: dt_min=%.4f dt_max=%.4f",
-        paramDtMinSec_,
-        paramDtMaxSec_);
+        *(node_.get_clock()),
+        500,
+        "[RingPassController] err_body_xyz=(%.2f %.2f %.2f) vel_ned=(%.2f %.2f %.2f) r_yz=%.2f",
+        errorX,
+        errorY,
+        errorZ,
+        vxLastNed_,
+        vyLastNed_,
+        vzLastNed_,
+        yzErrorRadius);
+
+    return Eigen::Vector3f(
+        static_cast<float>(vxLastNed_),
+        static_cast<float>(vyLastNed_),
+        static_cast<float>(vzLastNed_));
 }
 
-void MissionNode::setupInterfaces()
+Eigen::Vector3f RingPassController::computeHoldCommand(double dtSec)
 {
-    vehicleLocalPositionSub_ =
-        node_.create_subscription<px4_msgs::msg::VehicleLocalPosition>(
-            kVehicleLocalPositionTopic,
-            rclcpp::QoS(10).best_effort(),
-            std::bind(&MissionNode::vehicleLocalPositionCallback, this, std::placeholders::_1));
+    vxLastNed_ = applySlew(0.0, vxLastNed_, slewXyMps2_, dtSec);
+    vyLastNed_ = applySlew(0.0, vyLastNed_, slewXyMps2_, dtSec);
+    vzLastNed_ = applySlew(0.0, vzLastNed_, slewZMps2_, dtSec);
+
+    return Eigen::Vector3f(
+        static_cast<float>(vxLastNed_),
+        static_cast<float>(vyLastNed_),
+        static_cast<float>(vzLastNed_));
 }
 
-void MissionNode::vehicleLocalPositionCallback(
-    const px4_msgs::msg::VehicleLocalPosition::SharedPtr msg)
+Eigen::Vector3f RingPassController::update(double dtSec)
 {
-    currentPosition_.x() = msg->x;
-    currentPosition_.y() = msg->y;
-    currentPosition_.z() = msg->z;
-    currentYaw_ = msg->heading;
+    if (!attitudeReady() || targetTimedOut())
+    {
+        return computeHoldCommand(dtSec);
+    }
 
-    hasVehicleLocalPosition_ = true;
+    return computeVelocityCommand(dtSec);
 }
 
-void MissionNode::onActivate()
+
+void RingPassController::onActivate()
 {
     hasVehicleLocalPosition_ = false;
-    stateFirstTick_ = true;
+    state_ = RingModeState::WaitLocalPosition;
     stateEnterTime_ = node_.now();
-    state_ = RingModeState::WAIT_LOCAL_POSITION;
 
-    ringPassController_.reset();
+    reset();
 
-    RCLCPP_INFO(node_.get_logger(), "[RingPassMode] activated, waiting ring target");
+    RCLCPP_INFO(node_.get_logger(), "[RingPassMode] activated");
 }
 
-void MissionNode::onDeactivate()
+void RingPassController::onDeactivate()
 {
-    ringPassController_.reset();
+    reset();
+    publishVelocitySetpoint(Eigen::Vector3f::Zero());
     RCLCPP_INFO(node_.get_logger(), "[RingPassMode] deactivated");
 }
 
-void MissionNode::enterState(RingModeState newState)
+void RingPassController::enterState(RingModeState newState)
 {
     if (state_ == newState)
     {
@@ -439,25 +467,27 @@ void MissionNode::enterState(RingModeState newState)
 
     state_ = newState;
     stateEnterTime_ = node_.now();
-    stateFirstTick_ = true;
 
-    RCLCPP_INFO(
-        node_.get_logger(),
-        "[RingPassMode] enter state: %s",
-        ringModeStateToString(state_));
+    if (newState == RingModeState::RingPass)
+    {
+        hasForwardCommandedInPass_ = false;
+        ringPassStartTime_ = stateEnterTime_;
+    }
+
+    RCLCPP_INFO(node_.get_logger(), "[RingPassMode] enter state: %s", stateToString(state_));
 }
 
-void MissionNode::publishHoldPosition()
+void RingPassController::publishHoldPosition()
 {
     if (!trajectorySetpoint_)
     {
         return;
     }
 
-    trajectorySetpoint_->updatePosition(currentPosition_);
+    trajectorySetpoint_->updatePosition(currentPositionNed_);
 }
 
-void MissionNode::publishVelocitySetpoint(const Eigen::Vector3f& velocityNed)
+void RingPassController::publishVelocitySetpoint(const Eigen::Vector3f& velocityNed)
 {
     if (!trajectorySetpoint_)
     {
@@ -467,40 +497,40 @@ void MissionNode::publishVelocitySetpoint(const Eigen::Vector3f& velocityNed)
     trajectorySetpoint_->update(
         velocityNed,
         std::nullopt,
-        std::optional<float>{currentYaw_},
+        std::optional<float>{currentYawRad_},
         std::nullopt);
 }
 
-float MissionNode::sanitizeDt(float dtSec) const
+double RingPassController::sanitizeDt(double dtSec) const
 {
     if (!std::isfinite(dtSec))
     {
-        return paramDtMinSec_;
+        return dtMinSec_;
     }
 
-    return std::clamp(dtSec, paramDtMinSec_, paramDtMaxSec_);
+    return std::clamp(dtSec, dtMinSec_, dtMaxSec_);
 }
 
-const char* MissionNode::ringModeStateToString(RingModeState state) const
+const char* RingPassController::stateToString(RingModeState state) const
 {
     switch (state)
     {
-    case RingModeState::WAIT_LOCAL_POSITION:
+    case RingModeState::WaitLocalPosition:
         return "WAIT_LOCAL_POSITION";
-    case RingModeState::WAIT_RING_TARGET:
+    case RingModeState::WaitRingTarget:
         return "WAIT_RING_TARGET";
-    case RingModeState::RING_PASS:
+    case RingModeState::RingPass:
         return "RING_PASS";
-    case RingModeState::FINISHED:
+    case RingModeState::Finished:
         return "FINISHED";
     default:
         return "UNKNOWN";
     }
 }
 
-void MissionNode::updateSetpoint(float dt_s)
+void RingPassController::updateSetpoint(float dtSec)
 {
-    const float safeDtSec = sanitizeDt(dt_s);
+    const double safeDtSec = sanitizeDt(static_cast<double>(dtSec));
 
     if (!hasVehicleLocalPosition_)
     {
@@ -516,84 +546,105 @@ void MissionNode::updateSetpoint(float dt_s)
 
     switch (state_)
     {
-    case RingModeState::WAIT_LOCAL_POSITION:
+    case RingModeState::WaitLocalPosition:
     {
         publishHoldPosition();
-        enterState(RingModeState::WAIT_RING_TARGET);
+        enterState(RingModeState::WaitRingTarget);
         break;
     }
 
-    case RingModeState::WAIT_RING_TARGET:
+    case RingModeState::WaitRingTarget:
     {
-        (void)ringPassController_.update(safeDtSec);
+        (void)update(safeDtSec);
         publishHoldPosition();
 
-        if (!ringPassController_.isReady())
+        if (!isReady())
         {
             RCLCPP_WARN_THROTTLE(
                 node_.get_logger(),
                 *(node_.get_clock()),
                 1000,
-                "[RingPassMode] waiting for vehicle attitude");
+                "[RingPassMode] waiting for /fmu/out/vehicle_attitude");
             break;
         }
 
-        if (!ringPassController_.hasValidTarget())
+        if (!hasValidTarget())
         {
-            RCLCPP_WARN_THROTTLE(
-                node_.get_logger(),
-                *(node_.get_clock()),
-                1000,
-                "[RingPassMode] waiting for ring target: /ring_pass/target_error_body_fusion");
+            if (node_.now() < ignoreTargetUntil_)
+            {
+                RCLCPP_WARN_THROTTLE(
+                    node_.get_logger(),
+                    *(node_.get_clock()),
+                    1000,
+                    "[RingPassMode] waiting detector reset settle before accepting ring target");
+            }
+            else
+            {
+                RCLCPP_WARN_THROTTLE(
+                    node_.get_logger(),
+                    *(node_.get_clock()),
+                    1000,
+                    "[RingPassMode] waiting for /ring_detect/target_error_body_filtered");
+            }
             break;
         }
 
-        enterState(RingModeState::RING_PASS);
+        enterState(RingModeState::RingPass);
         break;
     }
 
-    case RingModeState::RING_PASS:
+    case RingModeState::RingPass:
     {
-        if (!ringPassController_.hasValidTarget())
+        if (!hasValidTarget())
         {
-            RCLCPP_WARN_THROTTLE(
-                node_.get_logger(),
-                *(node_.get_clock()),
-                1000,
-                "[RingPassMode] ring target lost, hold current position");
+            const double passDurationSec = (node_.now() - ringPassStartTime_).seconds();
+            const bool canFinishByLostTarget =
+                hasForwardCommandedInPass_ &&
+                passDurationSec >= minTimeBeforeFinishSec_;
 
-            (void)ringPassController_.update(safeDtSec);
-            publishHoldPosition();
-            enterState(RingModeState::WAIT_RING_TARGET);
+            if (canFinishByLostTarget)
+            {
+                RCLCPP_INFO(
+                    node_.get_logger(),
+                    "[RingPassMode] ring target lost after %.2f s with forward command, treat as passed through ring",
+                    passDurationSec);
+
+                publishVelocitySetpoint(Eigen::Vector3f::Zero());
+                enterState(RingModeState::Finished);
+            }
+            else
+            {
+                RCLCPP_WARN(
+                    node_.get_logger(),
+                    "[RingPassMode] target lost too early, not finish. pass_time=%.2f/%.2f has_forward=%d",
+                    passDurationSec,
+                    minTimeBeforeFinishSec_,
+                    static_cast<int>(hasForwardCommandedInPass_));
+
+                target_ = BodyTarget{};
+                vxLastNed_ = 0.0;
+                vyLastNed_ = 0.0;
+                vzLastNed_ = 0.0;
+                publishVelocitySetpoint(Eigen::Vector3f::Zero());
+                enterState(RingModeState::WaitRingTarget);
+            }
             break;
         }
 
-        const Eigen::Vector3f velocityCmdNed = ringPassController_.update(safeDtSec);
-
-        if (ringPassController_.isFinished())
-        {
-            publishVelocitySetpoint(Eigen::Vector3f::Zero());
-            enterState(RingModeState::FINISHED);
-            break;
-        }
-
+        const Eigen::Vector3f velocityCmdNed = update(safeDtSec);
         publishVelocitySetpoint(velocityCmdNed);
-
-        RCLCPP_INFO_THROTTLE(
-            node_.get_logger(),
-            *(node_.get_clock()),
-            500,
-            "[RingPassMode] vel_ned=(%.2f %.2f %.2f) pos=(%.2f %.2f %.2f)",
-            velocityCmdNed.x(), velocityCmdNed.y(), velocityCmdNed.z(),
-            currentPosition_.x(), currentPosition_.y(), currentPosition_.z());
         break;
     }
 
-    case RingModeState::FINISHED:
+    case RingModeState::Finished:
     default:
     {
         publishVelocitySetpoint(Eigen::Vector3f::Zero());
-        completed(px4_ros2::Result::Success);
+        if (!completedReported_)
+        {
+            completedReported_ = true;
+            completed(px4_ros2::Result::Success);
+        }
         break;
     }
     }
@@ -602,7 +653,7 @@ void MissionNode::updateSetpoint(float dt_s)
 int main(int argc, char* argv[])
 {
     rclcpp::init(argc, argv);
-    rclcpp::spin(std::make_shared<px4_ros2::NodeWithMode<MissionNode>>(kModeName, kEnableDebugOutput));
+    rclcpp::spin(std::make_shared<px4_ros2::NodeWithMode<RingPassController>>(kModeName, kEnableDebugOutput));
     rclcpp::shutdown();
     return 0;
 }

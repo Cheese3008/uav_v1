@@ -9,19 +9,26 @@ WORKSPACE="$HOME/uav_v1"
 ROS_DISTRO_NAME="humble"
 
 # =========================
-# Cau hinh node camera UDP H264
-# Camera front cho ring_detector
+# Cau hinh camera UDP H264
+# Tam thoi chua can camera vi point_mission_mode chua xu ly anh
+# Khi can test camera thi doi ENABLE_CAMERA=true
 # =========================
 ENABLE_CAMERA=true
 CAMERA_PACKAGE="udp_h264_camera"
 CAMERA_EXECUTABLE="udp_h264_camera_node"
 
-CAMERA_IMAGE_TOPIC="/camera_front/image_raw"
-CAMERA_INFO_TOPIC="/camera_front/camera_info"
-CAMERA_FRAME_ID="camera_front_link"
+CAMERA_IMAGE_TOPIC="/camera_down/image_raw"
+CAMERA_INFO_TOPIC="/camera_down/camera_info"
+CAMERA_FRAME_ID="camera_down_link"
 CAMERA_UDP_PORT="5600"
 
-RING_PARAM_FILE="${WORKSPACE}/src/ring_detector/cfg/param.yaml"
+# =========================
+# Cau hinh point mission mode
+# =========================
+POINT_PARAM_FILE="${WORKSPACE}/src/point_mission_mode/cfg/params.yaml"
+
+# Neu chay Gazebo/SITL thi doi thanh true
+USE_SIM_TIME=false
 
 # =========================
 # Source moi truong
@@ -42,9 +49,9 @@ else
     exit 1
 fi
 
-if [ ! -f "${RING_PARAM_FILE}" ]; then
+if [ ! -f "${POINT_PARAM_FILE}" ]; then
     echo "[ERROR] Khong tim thay file param:"
-    echo "${RING_PARAM_FILE}"
+    echo "${POINT_PARAM_FILE}"
     exit 1
 fi
 
@@ -81,14 +88,20 @@ kill_old_nodes()
     echo "[INFO] Kiem tra va kill cac node cu neu co..."
     echo "=========================================="
 
+    # Camera cu
     kill_process_by_pattern "ros2 run ${CAMERA_PACKAGE} ${CAMERA_EXECUTABLE}"
     kill_process_by_pattern "${CAMERA_EXECUTABLE}"
 
+    # Ring node cu neu con dang chay
     kill_process_by_pattern "ros2 run ring_pass_mode ring_pass_mode"
     kill_process_by_pattern "ring_pass_mode"
-
     kill_process_by_pattern "ros2 run ring_detector ring_detector"
     kill_process_by_pattern "ring_detector"
+
+    # Point mission mode cu
+    kill_process_by_pattern "ros2 run point_mission_mode point_mission_mode"
+    kill_process_by_pattern "ros2 launch point_mission_mode point_mission_mode.launch.py"
+    kill_process_by_pattern "point_mission_mode"
 
     echo "[INFO] Da xu ly xong cac process cu."
 }
@@ -137,7 +150,7 @@ run_node()
 kill_old_nodes
 
 # =========================
-# Chay camera front node
+# Chay camera front node neu can
 # =========================
 if [ "${ENABLE_CAMERA}" = true ]; then
     run_node "udp_h264_camera_front" \
@@ -150,26 +163,29 @@ if [ "${ENABLE_CAMERA}" = true ]; then
 fi
 
 # =========================
-# Chay ring pass mode
+# Chay point mission mode
+# Mode: takeoff 3m -> F1 -> F3 -> F2 -> F4 -> F5 -> hold
 # =========================
-run_node "ring_pass_mode" \
-"ros2 run ring_pass_mode ring_pass_mode"
-
-# =========================
-# Chay ring detector
-# =========================
-run_node "ring_detector" \
-"ros2 run ring_detector ring_detector \
+run_node "point_mission_mode" \
+"ros2 run point_mission_mode point_mission_mode \
     --ros-args \
-    --params-file ${RING_PARAM_FILE}"
+    --params-file ${POINT_PARAM_FILE} \
+    -p use_sim_time:=${USE_SIM_TIME}"
 
 echo ""
-echo "[INFO] Tat ca node mode ring da chay."
-echo "[INFO] Camera topic:"
-echo "       ${CAMERA_IMAGE_TOPIC}"
-echo "       ${CAMERA_INFO_TOPIC}"
-echo "[INFO] Ring param:"
-echo "       ${RING_PARAM_FILE}"
+echo "[INFO] Point mission mode da chay."
+echo "[INFO] Param file:"
+echo "       ${POINT_PARAM_FILE}"
+echo "[INFO] Use sim time:"
+echo "       ${USE_SIM_TIME}"
+echo ""
+echo "[INFO] Debug topic:"
+echo "       ros2 topic echo /point_mission/state_debug"
+echo "       ros2 topic echo /point_mission/points_debug"
+echo ""
+echo "[INFO] Mode se xuat hien ten:"
+echo "       POINT_NAV"
+echo ""
 echo "[INFO] Bam Ctrl+C de dung tat ca."
 echo ""
 
