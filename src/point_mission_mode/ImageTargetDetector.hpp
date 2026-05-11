@@ -12,23 +12,25 @@ public:
     void configure(const ImageDetectorParams &params);
 
     // Mo ta:
-    //     Class xu ly anh rieng: detect vong tron/khoi theo HSV va CameraInfo.
+    //     Detect vong tron/khoi theo HSV va CameraInfo.
     // Input:
     //     bgrImage: anh BGR tu camera.
     //     hsvRange: nguong HSV min/max cua diem F hien tai.
     //     intrinsics: fx/fy/cx/cy lay tu /camera_down/camera_info.
-    //     projectionRangeDownM: do sau optical z uoc luong tu do cao hien tai.
+    //     projectionRangeDownM: do cao/chieu sau uoc luong theo huong Down, don vi met.
+    //     lockInput: diem pixel du doan tu FutureTargetPredictor de lock target.
     // Logic:
-    //     - Threshold HSV, morphology, contour scoring.
-    //     - Tinh normalized optical ray.
-    //     - Tao targetOpticalM = [ray_x*z, ray_y*z, z] de dua vao FrameTransformer.
+    //     - Threshold HSV, morphology, find contour.
+    //     - Neu co lockInput.valid thi uu tien contour gan predictedPixel.
+    //     - Neu useLockGate=true thi loai contour ngoai gate de tranh nhay target.
     // Output:
-    //     ImageTargetDetection chua pixel, optical ray, optical position va anh debug.
+    //     ImageTargetDetection va anh debug gom raw/hsv/mask/morph/contour/output.
     ImageTargetDetection detect(
         const cv::Mat &bgrImage,
         const HsvRange &hsvRange,
         const CameraIntrinsics &intrinsics,
         float projectionRangeDownM,
+        const ImageTargetLockInput &lockInput,
         cv::Mat *debugImage = nullptr) const;
 
 private:

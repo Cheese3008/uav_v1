@@ -2,8 +2,8 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>point_mission_mode</name>
-  <version>0.0.7</version>
-  <description>PX4 raw OFFBOARD auto-start node for point mission with local-coordinate navigation, belly fixed camera HSV detection, FrameTransformer, Kalman 1D image-error filtering, and velocity servo alignment.</description>
+  <version>0.0.8</version>
+  <description>PX4 raw OFFBOARD auto-start node for point mission with local-coordinate navigation, belly fixed camera HSV detection, FrameTransformer, Kalman 1D image-error filtering, and velocity servo alignment, configurable F-points, Kalman future prediction, dynamic-target early drop, and prediction-based target lock.</description>
   <maintainer email="user@example.com">pihuy</maintainer>
   <license>BSD-3-Clause</license>
 

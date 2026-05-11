@@ -23,6 +23,7 @@ add_executable(point_mission_mode
     Kalman1D.cpp
     ImageErrorKalman.cpp
     ImageErrorVelocityController.cpp
+    FutureTargetPredictor.cpp
 )
 
 target_include_directories(point_mission_mode PRIVATE

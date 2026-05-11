@@ -7,10 +7,11 @@
 #include <functional>
 #include <iomanip>
 #include <limits>
+#include <iterator>
 #include <sstream>
 #include <stdexcept>
 
-#include <cv_bridge/cv_bridge.hpp>
+#include <cv_bridge/cv_bridge.h>
 #include <opencv2/imgproc.hpp>
 #include <sensor_msgs/image_encodings.hpp>
 
@@ -57,7 +58,7 @@ PointMissionMode::PointMissionMode()
 {
     loadParameters();
     setupFrameTransformer();
-    initializePointsBodyFrame();
+    loadMissionPointsFromParams();
 
     _offboardControlModePub = _node.create_publisher<px4_msgs::msg::OffboardControlMode>(
         "/fmu/in/offboard_control_mode",
@@ -150,6 +151,9 @@ void PointMissionMode::loadParameters()
     _node.declare_parameter<bool>("offboard.auto_arm", _paramAutoArm);
     _node.declare_parameter<bool>("offboard.require_offboard_and_armed", _paramRequireOffboardAndArmed);
 
+    _node.declare_parameter<std::vector<std::string>>("mission.point_names", std::vector<std::string>{"F1", "F2", "F3", "F4", "F5"});
+    _node.declare_parameter<std::vector<std::string>>("mission.sequence", std::vector<std::string>{"F1", "F3", "F2", "F4", "F5"});
+
     _node.declare_parameter<std::string>("topics.image", _imageTopic);
     _node.declare_parameter<std::string>("topics.camera_info", _cameraInfoTopic);
     _node.declare_parameter<std::string>("topics.vehicle_odometry", _vehicleOdometryTopic);
@@ -187,6 +191,13 @@ void PointMissionMode::loadParameters()
     _node.declare_parameter<float>("image_servo.min_projection_range_m", _imageServoParams.minProjectionRangeM);
     _node.declare_parameter<float>("image_servo.max_projection_range_m", _imageServoParams.maxProjectionRangeM);
 
+    _node.declare_parameter<float>("target_prediction.lead_sec", _futureTargetPredictorParams.leadSec);
+    _node.declare_parameter<float>("target_prediction.release_lead_sec", _futureTargetPredictorParams.releaseLeadSec);
+    _node.declare_parameter<float>("target_prediction.lock_gate_px", _futureTargetPredictorParams.lockGatePx);
+    _node.declare_parameter<float>("target_prediction.min_speed_for_dynamic_mps", _futureTargetPredictorParams.minSpeedForDynamicMps);
+    _node.declare_parameter<float>("target_prediction.max_prediction_m", _futureTargetPredictorParams.maxPredictionM);
+    _node.declare_parameter<bool>("target_prediction.use_prediction_lock", _futureTargetPredictorParams.usePredictionLock);
+
     _node.declare_parameter<float>("image_kalman.x.q_acc", _imageErrorKalmanParams.x.qAcc);
     _node.declare_parameter<float>("image_kalman.x.r_pos", _imageErrorKalmanParams.x.rPos);
     _node.declare_parameter<float>("image_kalman.y.q_acc", _imageErrorKalmanParams.y.qAcc);
@@ -214,6 +225,8 @@ void PointMissionMode::loadParameters()
     _node.get_parameter("offboard.command_interval_sec", _paramOffboardCommandIntervalSec);
     _node.get_parameter("offboard.auto_arm", _paramAutoArm);
     _node.get_parameter("offboard.require_offboard_and_armed", _paramRequireOffboardAndArmed);
+    _node.get_parameter("mission.point_names", _missionPointNames);
+    _node.get_parameter("mission.sequence", _missionSequenceNames);
 
     _node.get_parameter("topics.image", _imageTopic);
     _node.get_parameter("topics.camera_info", _cameraInfoTopic);
@@ -265,6 +278,13 @@ void PointMissionMode::loadParameters()
     _node.get_parameter("image_servo.fixed_projection_range_m", _imageServoParams.fixedProjectionRangeM);
     _node.get_parameter("image_servo.min_projection_range_m", _imageServoParams.minProjectionRangeM);
     _node.get_parameter("image_servo.max_projection_range_m", _imageServoParams.maxProjectionRangeM);
+
+    _node.get_parameter("target_prediction.lead_sec", _futureTargetPredictorParams.leadSec);
+    _node.get_parameter("target_prediction.release_lead_sec", _futureTargetPredictorParams.releaseLeadSec);
+    _node.get_parameter("target_prediction.lock_gate_px", _futureTargetPredictorParams.lockGatePx);
+    _node.get_parameter("target_prediction.min_speed_for_dynamic_mps", _futureTargetPredictorParams.minSpeedForDynamicMps);
+    _node.get_parameter("target_prediction.max_prediction_m", _futureTargetPredictorParams.maxPredictionM);
+    _node.get_parameter("target_prediction.use_prediction_lock", _futureTargetPredictorParams.usePredictionLock);
 
     _node.get_parameter("image_kalman.x.q_acc", _imageErrorKalmanParams.x.qAcc);
     _node.get_parameter("image_kalman.x.r_pos", _imageErrorKalmanParams.x.rPos);
@@ -370,6 +390,7 @@ void PointMissionMode::loadParameters()
         _imageTargetDetector.configure(_imageDetectorParams);
         _imageErrorKalman.configure(_imageErrorKalmanParams);
         _imageErrorVelocityController.configure(_imageErrorControllerParams);
+        _futureTargetPredictor.configure(_futureTargetPredictorParams);
     }
     catch (const std::exception &e)
     {
@@ -383,7 +404,193 @@ void PointMissionMode::loadParameters()
     }
 }
 
-void PointMissionMode::initializePointsBodyFrame()
+void PointMissionMode::loadMissionPointsFromParams()
+{
+    _points.clear();
+    _missionSequence.clear();
+    _currentSequenceIndex = 0U;
+
+    if (_missionPointNames.empty())
+    {
+        initializeFallbackMissionPoints();
+        return;
+    }
+
+    const auto defaultRelativeForName = [this](const std::string &name) -> Eigen::Vector3f {
+        const float missionZ = -_geometryParams.takeoffAltitudeM;
+        if (name == "F1")
+        {
+            return Eigen::Vector3f(_geometryParams.xDistanceM, 0.0f, missionZ);
+        }
+        if (name == "F2")
+        {
+            return Eigen::Vector3f(_geometryParams.xDistanceM + _geometryParams.centerOffsetXM, 0.0f, missionZ);
+        }
+        if (name == "F3")
+        {
+            return Eigen::Vector3f(_geometryParams.xDistanceM + _geometryParams.centerOffsetXM,
+                _geometryParams.lateralSign * _geometryParams.lateralOffsetYM,
+                missionZ);
+        }
+        if (name == "F4")
+        {
+            return Eigen::Vector3f(_geometryParams.xDistanceM + _geometryParams.centerOffsetXM,
+                -_geometryParams.lateralSign * _geometryParams.lateralOffsetYM,
+                missionZ);
+        }
+        if (name == "F5")
+        {
+            return Eigen::Vector3f(_geometryParams.xDistanceM + _geometryParams.centerOffsetXM + _geometryParams.f5OffsetXM,
+                0.0f,
+                missionZ);
+        }
+        return Eigen::Vector3f(0.0f, 0.0f, missionZ);
+    };
+
+    const auto defaultHsvForName = [this](const std::string &name) -> point_mission_mode::HsvRange {
+        if (name == "F3" || name == "F4")
+        {
+            return _yellowHsvRange;
+        }
+        if (name == "F5")
+        {
+            return _blueHsvRange;
+        }
+        return _redHsvRange;
+    };
+
+
+    const auto declareVectorDouble = [this](const std::string &name, const std::vector<double> &value) {
+        if (!_node.has_parameter(name))
+        {
+            _node.declare_parameter<std::vector<double>>(name, value);
+        }
+    };
+
+    const auto declareVectorInt = [this](const std::string &name, const std::vector<int64_t> &value) {
+        if (!_node.has_parameter(name))
+        {
+            _node.declare_parameter<std::vector<int64_t>>(name, value);
+        }
+    };
+
+    const auto declareBool = [this](const std::string &name, bool value) {
+        if (!_node.has_parameter(name))
+        {
+            _node.declare_parameter<bool>(name, value);
+        }
+    };
+
+    const auto declareInt = [this](const std::string &name, int value) {
+        if (!_node.has_parameter(name))
+        {
+            _node.declare_parameter<int>(name, value);
+        }
+    };
+
+    const auto declareFloat = [this](const std::string &name, float value) {
+        if (!_node.has_parameter(name))
+        {
+            _node.declare_parameter<float>(name, value);
+        }
+    };
+
+    for (const std::string &pointName : _missionPointNames)
+    {
+        const std::string prefix = "mission.points." + pointName + ".";
+        const Eigen::Vector3f defaultRelative = defaultRelativeForName(pointName);
+        const point_mission_mode::HsvRange defaultHsv = defaultHsvForName(pointName);
+
+        declareVectorDouble(
+            prefix + "relative_body_frd",
+            std::vector<double>{defaultRelative.x(), defaultRelative.y(), defaultRelative.z()});
+        declareVectorInt(
+            prefix + "hsv_min",
+            std::vector<int64_t>{defaultHsv.min[0], defaultHsv.min[1], defaultHsv.min[2]});
+        declareVectorInt(
+            prefix + "hsv_max",
+            std::vector<int64_t>{defaultHsv.max[0], defaultHsv.max[1], defaultHsv.max[2]});
+        declareBool(prefix + "use_image_servo", true);
+        declareBool(prefix + "drop_enable", pointName == "F1");
+        declareInt(prefix + "drop_leg_id", pointName == "F1" ? 1 : 0);
+        declareBool(prefix + "moving_target", false);
+        declareFloat(prefix + "observe_sec", 0.35f);
+        declareFloat(prefix + "prediction_lead_sec", _futureTargetPredictorParams.leadSec);
+        declareFloat(prefix + "release_lead_sec", _futureTargetPredictorParams.releaseLeadSec);
+        declareFloat(prefix + "dynamic_drop_delay_sec", 0.10f);
+        declareFloat(prefix + "release_gate_m", _imageErrorControllerParams.centerToleranceM);
+        declareFloat(prefix + "min_speed_mps", _futureTargetPredictorParams.minSpeedForDynamicMps);
+        declareBool(prefix + "use_predicted_error_for_servo", true);
+
+        std::vector<double> relativeParam;
+        std::vector<int64_t> hsvMin;
+        std::vector<int64_t> hsvMax;
+
+        _node.get_parameter(prefix + "relative_body_frd", relativeParam);
+        _node.get_parameter(prefix + "hsv_min", hsvMin);
+        _node.get_parameter(prefix + "hsv_max", hsvMax);
+
+        Eigen::Vector3f relative = defaultRelative;
+        if (relativeParam.size() == 3U)
+        {
+            relative = Eigen::Vector3f(
+                static_cast<float>(relativeParam[0]),
+                static_cast<float>(relativeParam[1]),
+                static_cast<float>(relativeParam[2]));
+        }
+
+        point_mission_mode::point missionPoint;
+        missionPoint.name = pointName;
+        missionPoint.relativeBodyFrd = relative;
+        missionPoint.absoluteNed = Eigen::Vector3f::Zero();
+        missionPoint.hsvRange = makeRange(
+            vectorToArray3(hsvMin, defaultHsv.min),
+            vectorToArray3(hsvMax, defaultHsv.max));
+
+        _node.get_parameter(prefix + "use_image_servo", missionPoint.useImageServo);
+        _node.get_parameter(prefix + "drop_enable", missionPoint.dropCommandEnable);
+        _node.get_parameter(prefix + "drop_leg_id", missionPoint.dropLegId);
+        _node.get_parameter(prefix + "moving_target", missionPoint.dynamic.movingTarget);
+        _node.get_parameter(prefix + "observe_sec", missionPoint.dynamic.observeSec);
+        _node.get_parameter(prefix + "prediction_lead_sec", missionPoint.dynamic.predictionLeadSec);
+        _node.get_parameter(prefix + "release_lead_sec", missionPoint.dynamic.releaseLeadSec);
+        _node.get_parameter(prefix + "dynamic_drop_delay_sec", missionPoint.dynamic.dynamicDropDelaySec);
+        _node.get_parameter(prefix + "release_gate_m", missionPoint.dynamic.releaseGateM);
+        _node.get_parameter(prefix + "min_speed_mps", missionPoint.dynamic.minSpeedMps);
+        _node.get_parameter(prefix + "use_predicted_error_for_servo", missionPoint.dynamic.usePredictedErrorForServo);
+
+        _points.push_back(missionPoint);
+    }
+
+    for (const std::string &sequenceName : _missionSequenceNames)
+    {
+        auto iter = std::find_if(
+            _points.begin(),
+            _points.end(),
+            [&sequenceName](const point_mission_mode::point &missionPoint) {
+                return missionPoint.name == sequenceName;
+            });
+
+        if (iter == _points.end())
+        {
+            RCLCPP_WARN(
+                _node.get_logger(),
+                "[PointMission] mission.sequence bo qua point khong ton tai: %s",
+                sequenceName.c_str());
+            continue;
+        }
+
+        _missionSequence.push_back(static_cast<std::size_t>(std::distance(_points.begin(), iter)));
+    }
+
+    if (_points.empty() || _missionSequence.empty())
+    {
+        RCLCPP_WARN(_node.get_logger(), "[PointMission] mission param rong, dung fallback F1..F5");
+        initializeFallbackMissionPoints();
+    }
+}
+
+void PointMissionMode::initializeFallbackMissionPoints()
 {
     _points.clear();
     _missionSequence.clear();
@@ -398,13 +605,12 @@ void PointMissionMode::initializePointsBodyFrame()
     const Eigen::Vector3f f4BodyFrd(_geometryParams.xDistanceM + _geometryParams.centerOffsetXM, -side * _geometryParams.lateralOffsetYM, missionZ);
     const Eigen::Vector3f f5BodyFrd(_geometryParams.xDistanceM + _geometryParams.centerOffsetXM + _geometryParams.f5OffsetXM, 0.0f, missionZ);
 
-    _points.push_back(point_mission_mode::point{"F1", f1BodyFrd, Eigen::Vector3f::Zero(), _redHsvRange, true, true, 1});
-    _points.push_back(point_mission_mode::point{"F2", f2BodyFrd, Eigen::Vector3f::Zero(), _redHsvRange, true, false, 0});
-    _points.push_back(point_mission_mode::point{"F3", f3BodyFrd, Eigen::Vector3f::Zero(), _yellowHsvRange, true, false, 0});
-    _points.push_back(point_mission_mode::point{"F4", f4BodyFrd, Eigen::Vector3f::Zero(), _yellowHsvRange, true, false, 0});
-    _points.push_back(point_mission_mode::point{"F5", f5BodyFrd, Eigen::Vector3f::Zero(), _blueHsvRange, true, false, 0});
+    _points.push_back(point_mission_mode::point{"F1", f1BodyFrd, Eigen::Vector3f::Zero(), _redHsvRange, true, true, 1, {}});
+    _points.push_back(point_mission_mode::point{"F2", f2BodyFrd, Eigen::Vector3f::Zero(), _redHsvRange, true, false, 0, {}});
+    _points.push_back(point_mission_mode::point{"F3", f3BodyFrd, Eigen::Vector3f::Zero(), _yellowHsvRange, true, false, 0, {}});
+    _points.push_back(point_mission_mode::point{"F4", f4BodyFrd, Eigen::Vector3f::Zero(), _yellowHsvRange, true, false, 0, {}});
+    _points.push_back(point_mission_mode::point{"F5", f5BodyFrd, Eigen::Vector3f::Zero(), _blueHsvRange, true, false, 0, {}});
 
-    // Thu tu bay theo yeu cau: F1 -> F3 -> F2 -> F4 -> F5.
     _missionSequence = {0U, 2U, 1U, 3U, 4U};
 }
 
@@ -416,13 +622,15 @@ void PointMissionMode::setupMissionAfterLocalPositionReady()
     _landCommandSent = false;
     _latestDetectionValid = false;
     _latestFilteredImageError = point_mission_mode::FilteredImageError{};
+    _latestFuturePrediction = point_mission_mode::FutureTargetPrediction{};
     _stableStartTime.reset();
     _dropDelayStartTime.reset();
+    _dynamicObserveStartTime.reset();
     _lastLandCommandTime = rclcpp::Time(0, 0, RCL_ROS_TIME);
     _lastOffboardCommandTime = rclcpp::Time(0, 0, RCL_ROS_TIME);
     _offboardWarmupCounter = 0;
 
-    initializePointsBodyFrame();
+    loadMissionPointsFromParams();
     _imageErrorKalman.reset();
     _imageErrorVelocityController.reset();
 
@@ -1090,6 +1298,7 @@ void PointMissionMode::imageCallback(const sensor_msgs::msg::Image::SharedPtr ms
         }
 
         const float projectionRangeDownM = estimateProjectionRangeDownM();
+        const point_mission_mode::ImageTargetLockInput lockInput = buildImageLockInput();
 
         cv::Mat debugImage;
         _latestDetection = _imageTargetDetector.detect(
@@ -1097,10 +1306,12 @@ void PointMissionMode::imageCallback(const sensor_msgs::msg::Image::SharedPtr ms
             targetPoint.hsvRange,
             _cameraIntrinsics,
             projectionRangeDownM,
+            lockInput,
             _paramDebugEnable ? &debugImage : nullptr);
 
         _latestDetectionValid = false;
         _latestFilteredImageError = point_mission_mode::FilteredImageError{};
+        _latestFuturePrediction = point_mission_mode::FutureTargetPrediction{};
         _latestImageTime = _node.now();
 
         if (_latestDetection.valid && _latestDetection.opticalPositionValid)
@@ -1122,9 +1333,7 @@ void PointMissionMode::imageCallback(const sensor_msgs::msg::Image::SharedPtr ms
 
             const Eigen::Vector3f targetDeltaNed = targetWorldNed - _vehiclePositionNed;
             const Eigen::Vector3f targetErrorBody = worldDeltaToBodyFrd(targetDeltaNed);
-            const Eigen::Vector2f rawErrorBodyXY(
-                targetErrorBody.x(),
-                targetErrorBody.y());
+            const Eigen::Vector2f rawErrorBodyXY(targetErrorBody.x(), targetErrorBody.y());
 
             rclcpp::Time measurementStamp = msg->header.stamp;
             if (measurementStamp.nanoseconds() == 0)
@@ -1134,16 +1343,29 @@ void PointMissionMode::imageCallback(const sensor_msgs::msg::Image::SharedPtr ms
 
             _latestFilteredImageError = _imageErrorKalman.update(rawErrorBodyXY, measurementStamp);
             _latestDetectionValid = _latestFilteredImageError.valid;
+
+            point_mission_mode::FutureTargetPredictorParams predictorParams = predictorParamsForPoint(targetPoint);
+            _futureTargetPredictor.configure(predictorParams);
+
+            point_mission_mode::FutureTargetPredictorInput predictorInput;
+            predictorInput.filteredError = _latestFilteredImageError;
+            predictorInput.intrinsics = _cameraIntrinsics;
+            predictorInput.projectionRangeDownM = projectionRangeDownM;
+            const Eigen::Vector2f rollPitch = currentRollPitchRad();
+            predictorInput.rollRad = rollPitch.x();
+            predictorInput.pitchRad = rollPitch.y();
+            _latestFuturePrediction = _futureTargetPredictor.predict(predictorInput);
         }
 
         if (_paramDebugEnable && _imageDebugPub && !debugImage.empty())
         {
-            if (_latestFilteredImageError.valid)
+            if (_latestFuturePrediction.valid)
             {
-                const std::string kalmanText = "KF xy(m): " +
-                    std::to_string(_latestFilteredImageError.filteredBodyXY.x()).substr(0, 6) + "," +
-                    std::to_string(_latestFilteredImageError.filteredBodyXY.y()).substr(0, 6);
-                cv::putText(debugImage, kalmanText, cv::Point(12, 56), cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0, 255, 255), 2);
+                const std::string text = "FUT xy/v: " +
+                    std::to_string(_latestFuturePrediction.releaseBodyXY.x()).substr(0, 6) + "," +
+                    std::to_string(_latestFuturePrediction.releaseBodyXY.y()).substr(0, 6) + " / " +
+                    std::to_string(_latestFuturePrediction.speedMps).substr(0, 5);
+                cv::putText(debugImage, text, cv::Point(12, 460), cv::FONT_HERSHEY_SIMPLEX, 0.65, cv::Scalar(0, 255, 255), 2);
             }
 
             cv_bridge::CvImage debugMsg;
@@ -1298,6 +1520,7 @@ void PointMissionMode::handleImageServoPointState()
     if (!imageFresh)
     {
         _stableStartTime.reset();
+        _dynamicObserveStartTime.reset();
         publishVelocitySetpointNed(Eigen::Vector3f::Zero());
         RCLCPP_WARN_THROTTLE(
             _node.get_logger(),
@@ -1309,11 +1532,25 @@ void PointMissionMode::handleImageServoPointState()
     }
 
     point_mission_mode::ImageErrorControllerInput input;
-    input.filteredError = _latestFilteredImageError;
+    input.filteredError = makeServoErrorForCurrentPoint();
 
     const point_mission_mode::ImageErrorControllerOutput output = _imageErrorVelocityController.update(input);
     const Eigen::Vector3f velocityNed = bodyVelocityToNed(output.velocityBodyFrd);
     publishVelocitySetpointNed(velocityNed);
+
+    if (targetPoint.dynamic.movingTarget && targetPoint.dropCommandEnable)
+    {
+        if (shouldDropDynamicTarget(targetPoint, output, now))
+        {
+            publishVelocitySetpointNed(Eigen::Vector3f::Zero());
+            publishDropCommand(targetPoint);
+            advanceAfterCurrentPoint();
+            return;
+        }
+
+        publishStateDebug("dynamic_prediction_tracking");
+        return;
+    }
 
     if (!output.centered)
     {
@@ -1388,8 +1625,10 @@ void PointMissionMode::advanceAfterCurrentPoint()
     ++_currentSequenceIndex;
     _stableStartTime.reset();
     _dropDelayStartTime.reset();
+    _dynamicObserveStartTime.reset();
     _latestDetectionValid = false;
     _latestFilteredImageError = point_mission_mode::FilteredImageError{};
+    _latestFuturePrediction = point_mission_mode::FutureTargetPrediction{};
     _imageErrorKalman.reset();
     _imageErrorVelocityController.reset();
 
@@ -1401,6 +1640,111 @@ void PointMissionMode::advanceAfterCurrentPoint()
     {
         switchToState(State::NavigatePoints);
     }
+}
+
+point_mission_mode::ImageTargetLockInput PointMissionMode::buildImageLockInput() const
+{
+    point_mission_mode::ImageTargetLockInput lockInput{};
+
+    if (!_latestFuturePrediction.valid || !_futureTargetPredictorParams.usePredictionLock)
+    {
+        return lockInput;
+    }
+
+    lockInput.valid = true;
+    lockInput.useLockGate = true;
+    lockInput.usePredictionScore = true;
+    lockInput.predictedPixel = _latestFuturePrediction.predictedPixel;
+    lockInput.releasePixel = _latestFuturePrediction.releasePixel;
+    lockInput.nadirPixel = _latestFuturePrediction.nadirPixel;
+    lockInput.lockGatePx = _futureTargetPredictorParams.lockGatePx;
+    return lockInput;
+}
+
+point_mission_mode::FilteredImageError PointMissionMode::makeServoErrorForCurrentPoint() const
+{
+    point_mission_mode::FilteredImageError servoError = _latestFilteredImageError;
+
+    if (_currentSequenceIndex >= _missionSequence.size())
+    {
+        return servoError;
+    }
+
+    const point_mission_mode::point &targetPoint = missionPointAt(_currentSequenceIndex);
+    if (targetPoint.dynamic.movingTarget &&
+        targetPoint.dynamic.usePredictedErrorForServo &&
+        _latestFuturePrediction.valid &&
+        _latestFuturePrediction.dynamicValid)
+    {
+        servoError.filteredBodyXY = _latestFuturePrediction.releaseBodyXY;
+        servoError.velocityBodyXY = _latestFuturePrediction.velocityBodyXY;
+    }
+
+    return servoError;
+}
+
+point_mission_mode::FutureTargetPredictorParams PointMissionMode::predictorParamsForPoint(
+    const point_mission_mode::point &missionPoint) const
+{
+    point_mission_mode::FutureTargetPredictorParams params = _futureTargetPredictorParams;
+
+    params.leadSec = missionPoint.dynamic.movingTarget ? missionPoint.dynamic.predictionLeadSec : params.leadSec;
+    params.releaseLeadSec = missionPoint.dynamic.movingTarget ? missionPoint.dynamic.releaseLeadSec : params.releaseLeadSec;
+    params.minSpeedForDynamicMps = missionPoint.dynamic.movingTarget ? missionPoint.dynamic.minSpeedMps : params.minSpeedForDynamicMps;
+
+    return params;
+}
+
+bool PointMissionMode::shouldDropDynamicTarget(
+    const point_mission_mode::point &missionPoint,
+    const point_mission_mode::ImageErrorControllerOutput &output,
+    const rclcpp::Time &now)
+{
+    if (!_latestFuturePrediction.valid || !_latestFuturePrediction.dynamicValid)
+    {
+        _dynamicObserveStartTime.reset();
+        return false;
+    }
+
+    if (_latestFuturePrediction.speedMps < missionPoint.dynamic.minSpeedMps)
+    {
+        _dynamicObserveStartTime.reset();
+        return false;
+    }
+
+    const bool releaseCentered = _latestFuturePrediction.releaseBodyXY.norm() <= missionPoint.dynamic.releaseGateM;
+    const bool controllerCentered = output.centered;
+
+    if (!releaseCentered && !controllerCentered)
+    {
+        _dynamicObserveStartTime.reset();
+        return false;
+    }
+
+    if (!_dynamicObserveStartTime.has_value())
+    {
+        _dynamicObserveStartTime = now;
+        publishStateDebug("dynamic_target_seen_start_observe");
+        return false;
+    }
+
+    const double observedSec = (now - _dynamicObserveStartTime.value()).seconds();
+    const double requiredSec = static_cast<double>(missionPoint.dynamic.observeSec + missionPoint.dynamic.dynamicDropDelaySec);
+    return observedSec >= requiredSec;
+}
+
+Eigen::Vector2f PointMissionMode::currentRollPitchRad() const
+{
+    if (!_vehicleOdomValid)
+    {
+        return Eigen::Vector2f(0.0f, 0.0f);
+    }
+
+    const Eigen::Matrix3f rotationMatrix = _vehicleQned.toRotationMatrix();
+    const float rollRad = std::atan2(rotationMatrix(2, 1), rotationMatrix(2, 2));
+    const float pitchValue = std::clamp(-rotationMatrix(2, 0), -1.0f, 1.0f);
+    const float pitchRad = std::asin(pitchValue);
+    return Eigen::Vector2f(rollRad, pitchRad);
 }
 
 void PointMissionMode::handleReturnHomeAltitudeState()
@@ -1468,6 +1812,11 @@ void PointMissionMode::switchToState(State state)
     if (_state != State::DropDelay)
     {
         _dropDelayStartTime.reset();
+    }
+
+    if (_state != State::ImageServoPoint)
+    {
+        _dynamicObserveStartTime.reset();
     }
 
     RCLCPP_INFO(
@@ -1539,7 +1888,11 @@ void PointMissionMode::publishPointsDebug() const
            << "\"hsv_range\":" << hsvRangeToJson(missionPoint.hsvRange) << ","
            << "\"use_image_servo\":" << (missionPoint.useImageServo ? "true" : "false") << ","
            << "\"drop_enable\":" << (missionPoint.dropCommandEnable ? "true" : "false") << ","
-           << "\"drop_leg\":" << missionPoint.dropLegId
+           << "\"drop_leg\":" << missionPoint.dropLegId << ","
+           << "\"moving_target\":" << (missionPoint.dynamic.movingTarget ? "true" : "false") << ","
+           << "\"prediction_lead_sec\":" << missionPoint.dynamic.predictionLeadSec << ","
+           << "\"release_lead_sec\":" << missionPoint.dynamic.releaseLeadSec << ","
+           << "\"release_gate_m\":" << missionPoint.dynamic.releaseGateM
            << "}";
     }
 
@@ -1625,6 +1978,12 @@ void PointMissionMode::publishStateDebug(const std::string &extra) const
        << _latestFilteredImageError.velocityBodyXY.x() << ","
        << _latestFilteredImageError.velocityBodyXY.y() << "],"
        << "\"kalman_valid\":" << (_latestFilteredImageError.valid ? "true" : "false") << ","
+       << "\"future_valid\":" << (_latestFuturePrediction.valid ? "true" : "false") << ","
+       << "\"future_dynamic_valid\":" << (_latestFuturePrediction.dynamicValid ? "true" : "false") << ","
+       << "\"future_release_body_xy_m\":["
+       << _latestFuturePrediction.releaseBodyXY.x() << ","
+       << _latestFuturePrediction.releaseBodyXY.y() << "],"
+       << "\"future_speed_mps\":" << _latestFuturePrediction.speedMps << ","
        << "\"metric_valid\":" << (_latestDetection.metricValid ? "true" : "false") << ","
        << "\"projection_range_down_m\":" << _latestDetection.rangeDownM << ","
        << "\"image_area_px\":" << _latestDetection.areaPx << ","

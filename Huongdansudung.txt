@@ -1,0 +1,17 @@
+ter1:
+
+make px4_sitl gz_x500_mono_cam_down
+
+ter2:
+
+MicroXRCEAgent udp4 -p 8888
+
+ter3:
+
+rqt
+
+ter4:
+
+./home/cheese/uav_v1/services/run_point_mission.sh
+
+cho nay doi thanh duong dan vao file run_point_mission.sh

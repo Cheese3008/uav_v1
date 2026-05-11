@@ -1,34 +1,7 @@
 point_mission_mode:
   ros__parameters:
     # =========================
-    # Mission geometry
-    # =========================
-    takeoff_altitude_m: 3.0
-    x_distance_m: 8.0
-
-    # BODY-FRD tai thoi diem kich mode:
-    #   +X: Body X UAV
-    #   +Y: Body Y UAV
-    #   -Y: Left UAV
-    #   +Z: Down
-    f_center_offset_x_m: 2.5
-    f_lateral_offset_y_m: 2.5
-    f5_offset_x_m: 2.5
-    lateral_sign: -1.0
-
-    # Thu tu bay:
-    #   TAKEOFF -> F1 -> F3 -> F2 -> F4 -> F5
-    # Tai moi diem:
-    #   1) Bay bang toa do local NED/TrajectorySetpoint updatePosition
-    #   2) Detect HSV bang camera bung
-    #   3) optical -> body FRD -> world NED bang FrameTransformer
-    #   4) Kalman 1D rieng cho sai so x/y
-    #   5) Dieu khien velocity theo sai so XY da loc
-    # Cuoi mission: RETURN_HOME_ALTITUDE -> LAND.
-
-    # =========================
     # OFFBOARD auto start
-    # Khi run node, node se stream setpoint truoc, sau do gui lenh OFFBOARD + ARM.
     # =========================
     offboard:
       timer_rate_hz: 50.0
@@ -36,15 +9,6 @@ point_mission_mode:
       command_interval_sec: 1.0
       auto_arm: true
       require_offboard_and_armed: false
-
-    # =========================
-    # Position setpoint navigator limits
-    # =========================
-    max_horizontal_speed: 1.2
-    max_vertical_speed: 0.6
-    acceptance_xy: 0.20
-    acceptance_z: 0.15
-    land_command_interval_sec: 1.0
 
     # =========================
     # Topics
@@ -57,10 +21,119 @@ point_mission_mode:
       drop_command: /point_mission/drop_command
 
     # =========================
-    # Camera mount: belly_fixed_camera, gan cung duoi bung
-    # PX4 body FRD:
-    #   x+: body X, y+: body Y, z+: body Z/down
-    # Doi cam_offset_z tuy cach ban do goc body -> tam camera.
+    # Mission global params
+    # =========================
+    takeoff_altitude_m: 3.0
+    max_horizontal_speed: 1.2
+    max_vertical_speed: 0.6
+    acceptance_xy: 0.20
+    acceptance_z: 0.15
+    land_command_interval_sec: 1.0
+
+    # Fallback geometry if a point is missing from mission.points
+    x_distance_m: 8.0
+    f_center_offset_x_m: 2.5
+    f_lateral_offset_y_m: 2.5
+    f5_offset_x_m: 2.5
+    lateral_sign: -1.0
+
+    # =========================
+    # Mission path is fully configurable here
+    # relative_body_frd: [x, y, z]
+    #   x+: front at node start heading
+    #   y+: right, y-: left
+    #   z+: down, so 3m height is -3.0
+    # sequence: flight order
+    # =========================
+    mission:
+      point_names: [F1, F2, F3, F4, F5]
+      sequence: [F1, F3, F2, F4, F5]
+
+      points:
+        F1:
+          relative_body_frd: [8.0, 0.0, -3.0]
+          hsv_min: [170, 80, 80]
+          hsv_max: [10, 255, 255]
+          use_image_servo: true
+          drop_enable: false
+          drop_leg_id: 0
+          moving_target: false
+          observe_sec: 0.35
+          prediction_lead_sec: 0.25
+          release_lead_sec: 0.35
+          dynamic_drop_delay_sec: 0.10
+          release_gate_m: 0.18
+          min_speed_mps: 0.05
+          use_predicted_error_for_servo: true
+
+        F2:
+          relative_body_frd: [10.5, 0.0, -3.0]
+          hsv_min: [170, 80, 80]
+          hsv_max: [10, 255, 255]
+          use_image_servo: true
+          drop_enable: false
+          drop_leg_id: 0
+          moving_target: false
+          observe_sec: 0.35
+          prediction_lead_sec: 0.25
+          release_lead_sec: 0.35
+          dynamic_drop_delay_sec: 0.10
+          release_gate_m: 0.18
+          min_speed_mps: 0.05
+          use_predicted_error_for_servo: true
+
+        F3:
+          relative_body_frd: [10.5, -2.5, -3.0]
+          hsv_min: [20, 80, 80]
+          hsv_max: [40, 255, 255]
+          use_image_servo: true
+          drop_enable: false
+          drop_leg_id: 0
+          moving_target: false
+          observe_sec: 0.35
+          prediction_lead_sec: 0.25
+          release_lead_sec: 0.35
+          dynamic_drop_delay_sec: 0.10
+          release_gate_m: 0.18
+          min_speed_mps: 0.05
+          use_predicted_error_for_servo: true
+
+        F4:
+          relative_body_frd: [10.5, 2.5, -3.0]
+          hsv_min: [20, 80, 80]
+          hsv_max: [40, 255, 255]
+          use_image_servo: true
+          drop_enable: false
+          drop_leg_id: 0
+          moving_target: false
+          observe_sec: 0.35
+          prediction_lead_sec: 0.25
+          release_lead_sec: 0.35
+          dynamic_drop_delay_sec: 0.10
+          release_gate_m: 0.18
+          min_speed_mps: 0.05
+          use_predicted_error_for_servo: true
+
+        F5:
+          relative_body_frd: [13.0, 0.0, -3.0]
+          hsv_min: [95, 80, 60]
+          hsv_max: [130, 255, 255]
+          use_image_servo: true
+          # Vi du: F5 la muc tieu dong va tha bong chan 1.
+          # Neu muon F1 tha bong nhu logic cu thi doi F1.drop_enable=true va F5.drop_enable=false.
+          drop_enable: true
+          drop_leg_id: 1
+          moving_target: true
+          observe_sec: 0.35
+          prediction_lead_sec: 0.25
+          release_lead_sec: 0.45
+          dynamic_drop_delay_sec: 0.10
+          release_gate_m: 0.20
+          min_speed_mps: 0.05
+          use_predicted_error_for_servo: true
+
+    # =========================
+    # Camera fixed belly mount
     # =========================
     camera_mount:
       cam_offset_x: 0.0
@@ -68,10 +141,9 @@ point_mission_mode:
       cam_offset_z: -0.10
 
     # =========================
-    # HSV min/max cho tung mau/khoi
-    # OpenCV HSV: H [0..179], S/V [0..255]
-    # Mau do co wrap hue, red.min.H=170 va red.max.H=10 la hop le.
-    # Detector se tu tach thanh [170..179] U [0..10].
+    # HSV fallback/color groups
+    # Point-specific HSV above has higher importance.
+    # Red wraps hue: min.H > max.H is valid.
     # =========================
     hsv:
       red:
@@ -85,7 +157,7 @@ point_mission_mode:
         max: [130, 255, 255]
 
     # =========================
-    # Image detector
+    # Image detector pipeline
     # =========================
     image_detector:
       min_area_px: 250
@@ -95,8 +167,25 @@ point_mission_mode:
       morph_kernel_size: 5
 
     # =========================
-    # Kalman 1D cho sai so anh sau transform
-    # x: body x error, y: body y error
+    # Visual servo controller
+    # =========================
+    image_servo:
+      kp_x: 0.6
+      kp_y: 0.6
+      max_xy_velocity: 0.45
+      center_tolerance_m: 0.12
+      stable_hold_sec: 1.0
+      drop_delay_sec: 1.0
+      image_timeout_sec: 0.5
+      invert_x: false
+      invert_y: false
+      use_current_altitude_for_projection: true
+      fixed_projection_range_m: 3.0
+      min_projection_range_m: 0.3
+      max_projection_range_m: 10.0
+
+    # =========================
+    # Kalman 1D for image XY error
     # =========================
     image_kalman:
       x:
@@ -110,30 +199,15 @@ point_mission_mode:
       max_predict_dt: 0.20
 
     # =========================
-    # Image servo velocity controller
-    # Controller chi nhan sai so XY da loc Kalman, don vi met.
+    # Future target prediction / lock
     # =========================
-    image_servo:
-      kp_x: 0.6
-      kp_y: 0.6
-      max_xy_velocity: 0.45
-      center_tolerance_m: 0.12
-      stable_hold_sec: 1.0
-      drop_delay_sec: 1.0
-      image_timeout_sec: 0.5
+    target_prediction:
+      lead_sec: 0.25
+      release_lead_sec: 0.35
+      lock_gate_px: 90.0
+      min_speed_for_dynamic_mps: 0.05
+      max_prediction_m: 3.0
+      use_prediction_lock: true
 
-      # Doi true neu test thuc te thay servo bi nguoc truc.
-      invert_x: false
-      invert_y: false
-
-      # Dung do cao hien tai de chieu optical ray xuong mat dat.
-      use_current_altitude_for_projection: true
-      fixed_projection_range_m: 3.0
-      min_projection_range_m: 0.3
-      max_projection_range_m: 10.0
-
-    # =========================
-    # Debug
-    # =========================
     debug:
       enable: true

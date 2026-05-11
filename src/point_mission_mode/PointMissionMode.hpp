@@ -25,6 +25,7 @@
 #include "FrameTransformer.hpp"
 #include "ImageErrorKalman.hpp"
 #include "ImageErrorVelocityController.hpp"
+#include "FutureTargetPredictor.hpp"
 
 class PointMissionMode : public rclcpp::Node
 {
@@ -50,7 +51,8 @@ private:
 
 private:
     void loadParameters();
-    void initializePointsBodyFrame();
+    void loadMissionPointsFromParams();
+    void initializeFallbackMissionPoints();
     bool tryCaptureStartPose();
     void setupMissionAfterLocalPositionReady();
     Eigen::Vector3f bodyFrdToNedDelta(const Eigen::Vector3f &bodyFrd) const;
@@ -92,6 +94,11 @@ private:
     void handleLandState();
     void handleFinishedState();
     void advanceAfterCurrentPoint();
+    point_mission_mode::ImageTargetLockInput buildImageLockInput() const;
+    point_mission_mode::FilteredImageError makeServoErrorForCurrentPoint() const;
+    point_mission_mode::FutureTargetPredictorParams predictorParamsForPoint(const point_mission_mode::point &missionPoint) const;
+    bool shouldDropDynamicTarget(const point_mission_mode::point &missionPoint, const point_mission_mode::ImageErrorControllerOutput &output, const rclcpp::Time &now);
+    Eigen::Vector2f currentRollPitchRad() const;
 
     void switchToState(State state);
     std::string stateName(State state) const;
@@ -129,12 +136,16 @@ private:
     point_mission_mode::HsvRange _redHsvRange{};
     point_mission_mode::HsvRange _yellowHsvRange{};
     point_mission_mode::HsvRange _blueHsvRange{};
+    std::vector<std::string> _missionPointNames{};
+    std::vector<std::string> _missionSequenceNames{};
 
     frame_transform::FrameTransformer _frameTransformer{};
     point_mission_mode::ImageTargetDetector _imageTargetDetector{};
     point_mission_mode::ImageErrorKalman _imageErrorKalman{};
     point_mission_mode::ImageErrorVelocityController _imageErrorVelocityController{};
+    point_mission_mode::FutureTargetPredictor _futureTargetPredictor{};
     point_mission_mode::ImageTargetDetection _latestDetection{};
+    point_mission_mode::FutureTargetPrediction _latestFuturePrediction{};
     point_mission_mode::FilteredImageError _latestFilteredImageError{};
 
     std::vector<point_mission_mode::point> _points;
@@ -177,12 +188,14 @@ private:
     int _paramOffboardWarmupSetpointCount{20};
     bool _paramAutoArm{true};
     bool _paramRequireOffboardAndArmed{false};
+    point_mission_mode::FutureTargetPredictorParams _futureTargetPredictorParams{};
 
     rclcpp::Time _lastLandCommandTime{0, 0, RCL_ROS_TIME};
     rclcpp::Time _lastOffboardCommandTime{0, 0, RCL_ROS_TIME};
     rclcpp::Time _latestImageTime{0, 0, RCL_ROS_TIME};
     std::optional<rclcpp::Time> _stableStartTime;
     std::optional<rclcpp::Time> _dropDelayStartTime;
+    std::optional<rclcpp::Time> _dynamicObserveStartTime;
     int _offboardWarmupCounter{0};
     uint8_t _navState{0U};
     uint8_t _armingState{0U};
