@@ -12,6 +12,7 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(PkgConfig REQUIRED)
+find_package(camera_info_manager REQUIRED)
 
 pkg_check_modules(GSTREAMER REQUIRED
   gstreamer-1.0
@@ -33,6 +34,7 @@ target_include_directories(camera_usb_gst_node PUBLIC
 ament_target_dependencies(camera_usb_gst_node
   rclcpp
   sensor_msgs
+  camera_info_manager
 )
 
 target_link_libraries(camera_usb_gst_node

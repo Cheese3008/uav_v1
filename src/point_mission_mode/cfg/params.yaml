@@ -1,0 +1,213 @@
+point_mission_mode:
+  ros__parameters:
+    # =========================
+    # OFFBOARD auto start
+    # =========================
+    offboard:
+      timer_rate_hz: 50.0
+      warmup_setpoint_count: 20
+      command_interval_sec: 1.0
+      auto_arm: true
+      require_offboard_and_armed: false
+
+    # =========================
+    # Topics
+    # =========================
+    topics:
+      image: /camera_down/image_raw
+      camera_info: /camera_down/camera_info
+      vehicle_odometry: /fmu/out/vehicle_odometry
+      image_debug: /point_mission/image_debug
+      drop_command: /point_mission/drop_command
+
+    # =========================
+    # Mission global params
+    # =========================
+    takeoff_altitude_m: 3.0
+    max_horizontal_speed: 1.2
+    max_vertical_speed: 0.6
+    acceptance_xy: 0.20
+    acceptance_z: 0.15
+    land_command_interval_sec: 1.0
+
+    # Fallback geometry if a point is missing from mission.points
+    x_distance_m: 8.0
+    f_center_offset_x_m: 2.5
+    f_lateral_offset_y_m: 2.5
+    f5_offset_x_m: 2.5
+    lateral_sign: -1.0
+
+    # =========================
+    # Mission path is fully configurable here
+    # relative_body_frd: [x, y, z]
+    #   x+: front at node start heading
+    #   y+: right, y-: left
+    #   z+: down, so 3m height is -3.0
+    # sequence: flight order
+    # =========================
+    mission:
+      point_names: [F1, F2, F3, F4, F5]
+      sequence: [F1, F3, F2, F4, F5]
+
+      points:
+        F1:
+          relative_body_frd: [8.0, 0.0, -3.0]
+          hsv_min: [170, 80, 80]
+          hsv_max: [10, 255, 255]
+          use_image_servo: true
+          drop_enable: false
+          drop_leg_id: 0
+          moving_target: false
+          observe_sec: 0.35
+          prediction_lead_sec: 0.25
+          release_lead_sec: 0.35
+          dynamic_drop_delay_sec: 0.10
+          release_gate_m: 0.18
+          min_speed_mps: 0.05
+          use_predicted_error_for_servo: true
+
+        F2:
+          relative_body_frd: [10.5, 0.0, -3.0]
+          hsv_min: [170, 80, 80]
+          hsv_max: [10, 255, 255]
+          use_image_servo: true
+          drop_enable: false
+          drop_leg_id: 0
+          moving_target: false
+          observe_sec: 0.35
+          prediction_lead_sec: 0.25
+          release_lead_sec: 0.35
+          dynamic_drop_delay_sec: 0.10
+          release_gate_m: 0.18
+          min_speed_mps: 0.05
+          use_predicted_error_for_servo: true
+
+        F3:
+          relative_body_frd: [10.5, -2.5, -3.0]
+          hsv_min: [20, 80, 80]
+          hsv_max: [40, 255, 255]
+          use_image_servo: true
+          drop_enable: false
+          drop_leg_id: 0
+          moving_target: false
+          observe_sec: 0.35
+          prediction_lead_sec: 0.25
+          release_lead_sec: 0.35
+          dynamic_drop_delay_sec: 0.10
+          release_gate_m: 0.18
+          min_speed_mps: 0.05
+          use_predicted_error_for_servo: true
+
+        F4:
+          relative_body_frd: [10.5, 2.5, -3.0]
+          hsv_min: [20, 80, 80]
+          hsv_max: [40, 255, 255]
+          use_image_servo: true
+          drop_enable: false
+          drop_leg_id: 0
+          moving_target: false
+          observe_sec: 0.35
+          prediction_lead_sec: 0.25
+          release_lead_sec: 0.35
+          dynamic_drop_delay_sec: 0.10
+          release_gate_m: 0.18
+          min_speed_mps: 0.05
+          use_predicted_error_for_servo: true
+
+        F5:
+          relative_body_frd: [13.0, 0.0, -3.0]
+          hsv_min: [95, 80, 60]
+          hsv_max: [130, 255, 255]
+          use_image_servo: true
+          # Vi du: F5 la muc tieu dong va tha bong chan 1.
+          # Neu muon F1 tha bong nhu logic cu thi doi F1.drop_enable=true va F5.drop_enable=false.
+          drop_enable: true
+          drop_leg_id: 1
+          moving_target: true
+          observe_sec: 0.35
+          prediction_lead_sec: 0.25
+          release_lead_sec: 0.45
+          dynamic_drop_delay_sec: 0.10
+          release_gate_m: 0.20
+          min_speed_mps: 0.05
+          use_predicted_error_for_servo: true
+
+    # =========================
+    # Camera fixed belly mount
+    # =========================
+    camera_mount:
+      cam_offset_x: 0.0
+      cam_offset_y: 0.0
+      cam_offset_z: -0.10
+
+    # =========================
+    # HSV fallback/color groups
+    # Point-specific HSV above has higher importance.
+    # Red wraps hue: min.H > max.H is valid.
+    # =========================
+    hsv:
+      red:
+        min: [170, 80, 80]
+        max: [10, 255, 255]
+      yellow:
+        min: [20, 80, 80]
+        max: [40, 255, 255]
+      blue:
+        min: [95, 80, 60]
+        max: [130, 255, 255]
+
+    # =========================
+    # Image detector pipeline
+    # =========================
+    image_detector:
+      min_area_px: 250
+      max_area_px: 250000
+      min_circularity: 0.55
+      min_fill_ratio: 0.45
+      morph_kernel_size: 5
+
+    # =========================
+    # Visual servo controller
+    # =========================
+    image_servo:
+      kp_x: 0.6
+      kp_y: 0.6
+      max_xy_velocity: 0.45
+      center_tolerance_m: 0.12
+      stable_hold_sec: 1.0
+      drop_delay_sec: 1.0
+      image_timeout_sec: 0.5
+      invert_x: false
+      invert_y: false
+      use_current_altitude_for_projection: true
+      fixed_projection_range_m: 3.0
+      min_projection_range_m: 0.3
+      max_projection_range_m: 10.0
+
+    # =========================
+    # Kalman 1D for image XY error
+    # =========================
+    image_kalman:
+      x:
+        q_acc: 0.04
+        r_pos: 0.02
+      y:
+        q_acc: 0.04
+        r_pos: 0.02
+      initial_position_var: 0.20
+      initial_velocity_var: 2.0
+      max_predict_dt: 0.20
+
+    # =========================
+    # Future target prediction / lock
+    # =========================
+    target_prediction:
+      lead_sec: 0.25
+      release_lead_sec: 0.35
+      lock_gate_px: 90.0
+      min_speed_for_dynamic_mps: 0.05
+      max_prediction_m: 3.0
+      use_prediction_lock: true
+
+    debug:
+      enable: true

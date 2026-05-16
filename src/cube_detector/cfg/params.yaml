@@ -20,52 +20,115 @@ cube_detector_node:
     camera_frame_id: camera_optical_frame
     world_frame_id: map_ned
 
-    # Camera gan cung duoi bung UAV, body PX4 la FRD: X front, Y right, Z down.
-    # Neu camera nam duoi tam drone 9 cm thi Z offset la +0.09, khong phai -0.09.
+    # Offset camera trong body FRD (m). Z dương = camera xuống dưới tâm khung.
+    # X+: trước drone
+    # Y+: phải drone
+    # Z+: xuống dưới drone
     cam_offset_x: 0.0
     cam_offset_y: 0.0
-    cam_offset_z: 0.09
+    cam_offset_z: 0.02
 
-    box_width_m: 0.45
+    box_width_m: 0.35   # Chiều rộng vật thật (m) — dùng cho ước lượng khoảng cách pinhole
 
-    h_min: 3
-    s_min: 15
-    v_min: 85
-    h_max: 42
+    # Chế độ: algorithm (LAB+contour) | yolo8n | yolo26n
+    detector_mode: algorithm
+
+    # HSV — chủ yếu cho luồng circle / debug cũ; box algorithm dùng LAB bên dưới
+    h_min: 5        # Hue min (OpenCV 0..180)
+    s_min: 80       # Saturation min
+    v_min: 50       # Value min
+    h_max: 30
     s_max: 255
     v_max: 255
 
-    min_box_area: 2000
-    max_box_area: 200000
+    # ═══ Algorithm: LAB (OpenCV BGR→Lab) + CLAHE trên kênh L ═══
+    # Primary mask — vùng “cam bình thường”; nới/tight theo ánh sáng thực tế
+    lab_l_min: 0
+    lab_a_min: 125
+    lab_b_min: 135
+    lab_l_max: 255
+    lab_a_max: 190
+    lab_b_max: 255
 
-    max_lock_missed: 30
-    lock_max_dist_px: 120.0
-    lock_min_size_ratio: 0.5
-    last_seen_hold_timeout_s: 0.5
+    # Mask phụ 1 — overexposed / cháy sáng (OR với primary)
+    lab_enable_overexposed_mask: true
+    lab_ov_l_min: 200
+    lab_ov_a_min: 120
+    lab_ov_b_min: 130
+    lab_ov_l_max: 255
+    lab_ov_a_max: 172
+    lab_ov_b_max: 185
 
-    kalman_q_acc_x: 0.01
-    kalman_q_acc_y: 0.01
-    kalman_q_acc_z: 0.01
-    kalman_r_pos_x: 0.05
-    kalman_r_pos_y: 0.05
+    # Mask phụ 2 — shadow / tối hơn (OR); tắt nếu không cần
+    lab_enable_shadow_mask: false
+    lab_sh_l_min: 0
+    lab_sh_a_min: 125
+    lab_sh_b_min: 130
+    lab_sh_l_max: 95
+    lab_sh_a_max: 195
+    lab_sh_b_max: 225
+
+    # Ratio LAB: bật gate AND — chỉ giữ pixel có (B − A) ≥ ngưỡng (ổn định màu cam)
+    lab_ratio_ba_gate: false
+    lab_ratio_ba_min: 8
+
+    # Nhánh OR thêm trên BGR: R > k*G và R > k*B (nhạy màu cam, có thể thêm nhiễu)
+    bgr_ratio_or_branch: false
+    bgr_r_over_g: 1.02
+    bgr_r_over_b: 1.02
+
+    clahe_clip_limit: 2.0   # CLAHE clip — cao hơn = tương phản cục bộ mạnh hơn trên kênh L
+    clahe_grid_size: 8      # Ô lưới CLAHE (pixel); 8 → tile 8×8
+
+    # Lọc hình học contour (sau mask)
+    min_fill_ratio: 0.35    # diện_tích_contour / diện_tích_bbox — loại vùng rỗng
+    min_aspect_ratio: 0.45  # bbox w/h; loại vạch quá mảnh
+    max_aspect_ratio: 2.7
+    max_circularity: 0.90 # 4πA/P²; tròn → ~1 — loại blob tròn như nắp / ánh sáng
+
+    # # ═══ YOLO (OpenCV DNN + ONNX) — chỉ khi detector_mode = yolo8n / yolo26n ═══
+    # yolo8_model_path: ""
+    # yolo26_model_path: ""
+    # yolo_input_size: 640
+    # yolo_conf_threshold: 0.35   # Ngưỡng confidence detection
+    # yolo_nms_threshold: 0.45    # IoU NMS
+    # yolo_target_class_id: -1    # -1 = mọi class; ≥0 = chỉ class đó
+    # yolo_use_cuda: false
+
+    # Giữ target_valid = true trong vài frame ngắn khi mất detection (chống nhấp nháy)
+    lost_grace_frames: 6
+
+    min_box_area: 500         # Diện tích contour tối thiểu (px²)
+    max_box_area: 200000      # Diện tích tối đa (chống full-frame)
+
+    # ═══ Lock / tracking (ảnh 2D) ═══
+    max_lock_missed: 30           # Bao nhiêu frame liên tiếp không detect thì bỏ lock
+    lock_max_dist_px: 120.0       # Khi đã lock: ứng viên xa tâm cũ hơn → loại (px)
+    lock_min_size_ratio: 0.5      # Kích thước bbox tối thiểu so với lần thấy trước
+
+    lock_search_roi_half_extent_px: 200  # Nửa cạnh ROI vuông quanh target khi locked (px)
+    lock_roi_fallback_full_frame: true   # Hết contour trong ROI → thử lại full frame 1 lần
+
+    mask_temporal_alpha: 0.55   # Làm mịn mask theo thời gian: 0=tắt; (0..1] = α blend với frame trước
+
+    # ═══ Pose từ bbox (pinhole) ═══
+    pose_use_min_area_rect: true   # Dùng minAreaRect thay bbox thẳng → ít giật khoảng cách
+    pose_corner_subpix: false      # Bật cornerSubPix trên contour (chậm hơn, ổn định hơn)
+    pose_subpix_win: 5             # Cửa sổ subpixel (lẻ, ≥3)
+
+    # Loại contour “đồng nhất” (blob nắng / trắng): std kênh A trong vùng mask quá thấp → reject
+    texture_reject_enable: false
+    texture_min_lab_a_stddev: 4.0
+
+    last_seen_hold_timeout_s: 0.5   # Timeout phụ (logic lost) — giữ cho tương thích
+
+    # ═══ Kalman 6 trạng thái [x,y,z,vx,vy,vz] trong NED ═══
+    kalman_q_acc_x: 0.001   # “Nhiễu gia tốc” quá trình — tăng → tin prediction hơn, mượt hơn
+    kalman_q_acc_y: 0.001
+    kalman_q_acc_z: 0.001
+    kalman_r_pos_x: 0.018  # Nhiễu đo vị trí — tăng → tin measurement ít hơn
+    kalman_r_pos_y: 0.018
     kalman_r_pos_z: 0.05
 
+    # Khi mất target: vẫn publish pose/velocity dự đoán từ Kalman (để tune), target_valid=false
     publish_prediction_when_lost: true
-
-    debug:
-      # Bật/tắt debug hình ảnh.
-      # true  = publish hình debug ra /cube_detector/algorithm_debug
-      # false = không tạo/publish hình debug để giảm tải CPU
-      enable: true
-
-      # Bật/tắt các topic dữ liệu raw để kiểm tra trước/sau transform.
-      # true  = publish:
-      #         /cube_detector/target_pose_camera_raw
-      #         /cube_detector/target_pose_world_raw
-      # false = không publish 2 topic raw này
-      raw_pose_enable: true
-
-      # Bật/tắt topic đo hiệu năng.
-      # true  = publish /cube_detector/performance để xem FPS
-      # false = không publish performance
-      performance_enable: false

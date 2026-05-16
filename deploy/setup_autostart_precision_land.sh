@@ -28,12 +28,12 @@ LEGACY_SERVICES=(
 
 SERVICES=(
   "microxrce-agent.service"
-  "usbcam_front.service"
+  # "usbcam_front.service"
   "usbcam_down.service"
-  "ring_detector.service"
+  # "ring_detector.service"
   "cube_detector.service"
-  "payload_gripper.service"
-  "ringcontroller.service"
+  # "payload_gripper.service"
+  # "ringcontroller.service"
 )
 
 echo "[INFO] Checking service scripts permissions..."

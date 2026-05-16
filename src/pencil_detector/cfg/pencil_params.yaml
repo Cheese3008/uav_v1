@@ -1,0 +1,42 @@
+# Pencil detector (vàng HSV + pinhole). Subscribe giống cube_detector (ảnh / camera_info / PX4 odometry / reset).
+# Publish toàn bộ sang namespace /pencil_detector/...
+pencil_detector_node:
+  ros__parameters:
+    topics:
+      image: /camera_down/image_raw
+      camera_info: /camera_down/camera_info
+      vehicle_odometry: /fmu/out/vehicle_odometry
+      reset: /pencil_detector/reset
+
+      hsv_debug: /pencil_detector/algorithm_debug   # tuong dong key topics.hsv_debug cua cube_detector
+      performance: /pencil_detector/performance
+
+      target_pose: /pencil_detector/target_pose
+      target_pose_camera_raw: /pencil_detector/target_pose_camera_raw
+      target_pose_world_raw: /pencil_detector/target_pose_world_raw
+      target_pose_world_filtered: /pencil_detector/target_pose_world_filtered
+      target_velocity_world_filtered: /pencil_detector/target_velocity_world_filtered
+      target_valid: /pencil_detector/target_valid
+
+    camera_frame_id: camera_optical_frame
+    world_frame_id: map_ned
+
+    cam_offset_x: 0.0
+    cam_offset_y: 0.0
+    cam_offset_z: 0.09
+
+    # Kich thuc vat theo bbox.max(w,h) de tinh pinhole Z (chu yeu dai but), don vi m.
+    object_extent_m: 0.18
+
+    yellow_h_low: 15
+    yellow_s_low: 60
+    yellow_v_low: 60
+    yellow_h_high: 45
+    yellow_s_high: 255
+    yellow_v_high: 255
+
+    yellow_morph_kernel_px: 5
+    yellow_min_area_px: 800.0
+
+    # 0 = khong gioi toc do publish pose; >0 vi du 30.0 Hz toi da
+    publish_hz_min: 0.0

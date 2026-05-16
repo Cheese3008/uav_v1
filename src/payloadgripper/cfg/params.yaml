@@ -20,39 +20,60 @@ payload_gripper_controller:
 
     # Điều khiển XY để bay vào tâm target.
     xy_kp: 0.8
-    xy_deadband: 0.03
+    xy_deadband: 0.02
     xy_max_velocity: 0.8
     slew_acc: 0.9
 
-    # Khi lateral error nhỏ hơn bán kính này thì coi như đã vào vùng tâm.
-    # Vì khối to, không cần quá nhỏ.
-    center_gate_radius: 0.35
+    # Chỉ khi lateral error nhỏ hơn bán kính này mới coi là vào tâm thật.
+    # 0.06 = 6 cm. Nếu pose nhiễu hoặc UAV khó giữ tâm, tăng lên 0.08.
+    center_gate_radius: 0.06
+
+    # Lệnh XY phải nhỏ hơn ngưỡng này mới tính là ổn định.
+    # Tránh trường hợp vừa lướt qua tâm đã hạ luôn.
+    center_stable_command_velocity: 0.06
 
     # Thời gian cần giữ ổn định trong vùng tâm trước khi lưu độ cao và bắt đầu hạ.
-    approach_settle_time: 0.50
+    approach_settle_time: 1.0
 
     # Độ cao UAV cần hạ xuống để gắp, tính theo abs(positionNed.z).
-    # Ví dụ 0.35 nghĩa là hạ xuống còn khoảng 35 cm so với local ground/origin.
-    grab_target_altitude: 0.35
-    grab_altitude_tolerance: 0.03
+    # Nếu EKF local Z của bạn đang được range/distance hỗ trợ thì giá trị này sẽ bám theo local height đó.
+    # 1.0 nghĩa là hạ xuống còn khoảng 1 m theo local Z.
+    grab_target_altitude: 0.5
+    grab_altitude_tolerance: 0.08
 
     # Vận tốc hạ, theo NED: vz > 0 là đi xuống.
     descend_velocity: 0.20
 
-    # Timeout cho pha hạ.
-    descend_timeout: 8.0
+    # Quan trọng:
+    # true = nếu đang hạ mà target lệch khỏi center_gate_radius hoặc mất object thì vz = 0.
+    # UAV sẽ dừng hạ và chỉ chỉnh XY lại.
+    descend_pause_when_unstable: true
 
-    # Sau khi tới độ cao gắp, giữ lại một chút rồi class ServoGripper sẽ tự kích gắp.
+    # Timeout cho pha hạ.
+    # Bay từ 4.5 m xuống 1.0 m với 0.2 m/s cần khoảng 17.5 s.
+    # Vì vậy không để 8 s nữa.
+    descend_timeout: 25.0
+
+    # Quan trọng:
+    # false = timeout nhưng chưa tới độ cao gắp thì giữ vị trí, KHÔNG kích servo gắp.
+    allow_grab_on_descend_timeout: false
+
+    # Sau khi tới độ cao gắp, giữ lại một chút rồi ServoGripper sẽ kích gắp.
     grab_ready_settle_time: 0.50
 
     # Sau khi gắp xong, UAV bay lên lại độ cao đã lưu trước khi hạ.
     # Theo NED: vz < 0 là bay lên, code tự đổi dấu nên YAML để số dương.
     climb_velocity: 0.25
     climb_altitude_tolerance: 0.05
-    climb_timeout: 8.0
+
+    # Nếu lưu độ cao lúc bắt đầu hạ là 4.5 m, đang ở 1.0 m, leo với 0.25 m/s cần khoảng 14 s.
+    # Vì vậy tăng timeout leo lên để không complete sớm.
+    climb_timeout: 20.0
 
     gripper:
-      # QGC phải set MAIN5 / Motor5 = Peripheral via Actuator Set 1.
+      # QGC phải set:
+      # PWM AUX1 = Peripheral via Actuator Set 1
+      #
       # Actuator Set 1 tương ứng param1 trong VEHICLE_CMD_DO_SET_ACTUATOR.
       actuator_index: 1
 

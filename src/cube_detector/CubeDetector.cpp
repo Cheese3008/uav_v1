@@ -50,11 +50,17 @@ CubeDetectorNode::CubeDetectorNode()
 	//
 	// FrameTransformer se thuc hien:
 	//   optical -> mount/body FRD -> local NED
-	const auto ft_config = frame_transform::FrameTransformer::makeBellyFixedCameraConfig(
-		Eigen::Vector3d(_p.cam_offset_x, _p.cam_offset_y, _p.cam_offset_z));
+	const auto cameraOffsetBody = Eigen::Vector3d(
+    _p.cam_offset_x,
+    _p.cam_offset_y,
+    _p.cam_offset_z);
+
+	const auto ft_config =
+		frame_transform::FrameTransformer::makeBellyFixedCameraLeft90Config(cameraOffsetBody);
+
 	_frame_transformer.setConfig(ft_config);
 
-	auto qos = rclcpp::QoS(1).best_effort();
+	auto qos = rclcpp::QoS(10).best_effort();
 
 	_image_sub = create_subscription<sensor_msgs::msg::Image>(
 		_p.image_topic, qos,
@@ -97,8 +103,8 @@ CubeDetectorNode::CubeDetectorNode()
 
 	// Algorithm debug publisher
 	// Topic: /cube_detector/algorithm_debug
-	// Panel trai: HSV mask (xanh la = detect, den = khong detect)
-	// Panel phai: anh goc, vung detect chuyen thanh orange (BGR: 0,140,255)
+	// detector_mode=algorithm: luoi 2x3 (LAB, mask mau, morph, pre-temporal, final, overlay)
+	// YOLO: 2 panel (mask fallback + overlay)
 	_hsv_debug_pub = create_publisher<sensor_msgs::msg::Image>(_p.hsv_debug_topic, qos);
 
 	RCLCPP_INFO(get_logger(), "===== CubeDetectorNode started =====");
@@ -118,10 +124,6 @@ CubeDetectorNode::CubeDetectorNode()
 	RCLCPP_INFO(get_logger(), "Output filtered   : %s and %s",
 		_p.target_pose_topic.c_str(), _p.target_pose_world_filtered_topic.c_str());
 	RCLCPP_INFO(get_logger(), "detector_mode     : %s", _p.detector_mode.c_str());
-	RCLCPP_INFO(get_logger(), "debug enable=%d raw_pose=%d performance=%d",
-		static_cast<int>(_p.debug_enable),
-		static_cast<int>(_p.debug_raw_pose_enable),
-		static_cast<int>(_p.debug_performance_enable));
 
 	if (_p.detector_mode == kModeYolo8n) {
 		_yolo8_loaded = loadYoloModel(_yolo8_net, _p.yolo8_model_path, "yolo8n");
@@ -184,6 +186,30 @@ void CubeDetectorNode::loadParameters()
 	_p.max_aspect_ratio = declare_parameter<double>("max_aspect_ratio", _p.max_aspect_ratio);
 	_p.max_circularity = declare_parameter<double>("max_circularity", _p.max_circularity);
 
+	_p.lab_enable_overexposed_mask =
+		declare_parameter<bool>("lab_enable_overexposed_mask", _p.lab_enable_overexposed_mask);
+	_p.lab_ov_l_min = declare_parameter<int>("lab_ov_l_min", _p.lab_ov_l_min);
+	_p.lab_ov_a_min = declare_parameter<int>("lab_ov_a_min", _p.lab_ov_a_min);
+	_p.lab_ov_b_min = declare_parameter<int>("lab_ov_b_min", _p.lab_ov_b_min);
+	_p.lab_ov_l_max = declare_parameter<int>("lab_ov_l_max", _p.lab_ov_l_max);
+	_p.lab_ov_a_max = declare_parameter<int>("lab_ov_a_max", _p.lab_ov_a_max);
+	_p.lab_ov_b_max = declare_parameter<int>("lab_ov_b_max", _p.lab_ov_b_max);
+
+	_p.lab_enable_shadow_mask =
+		declare_parameter<bool>("lab_enable_shadow_mask", _p.lab_enable_shadow_mask);
+	_p.lab_sh_l_min = declare_parameter<int>("lab_sh_l_min", _p.lab_sh_l_min);
+	_p.lab_sh_a_min = declare_parameter<int>("lab_sh_a_min", _p.lab_sh_a_min);
+	_p.lab_sh_b_min = declare_parameter<int>("lab_sh_b_min", _p.lab_sh_b_min);
+	_p.lab_sh_l_max = declare_parameter<int>("lab_sh_l_max", _p.lab_sh_l_max);
+	_p.lab_sh_a_max = declare_parameter<int>("lab_sh_a_max", _p.lab_sh_a_max);
+	_p.lab_sh_b_max = declare_parameter<int>("lab_sh_b_max", _p.lab_sh_b_max);
+
+	_p.lab_ratio_ba_gate = declare_parameter<bool>("lab_ratio_ba_gate", _p.lab_ratio_ba_gate);
+	_p.lab_ratio_ba_min  = declare_parameter<int>("lab_ratio_ba_min", _p.lab_ratio_ba_min);
+	_p.bgr_ratio_or_branch = declare_parameter<bool>("bgr_ratio_or_branch", _p.bgr_ratio_or_branch);
+	_p.bgr_r_over_g        = declare_parameter<double>("bgr_r_over_g", _p.bgr_r_over_g);
+	_p.bgr_r_over_b        = declare_parameter<double>("bgr_r_over_b", _p.bgr_r_over_b);
+
 	_p.yolo8_model_path = declare_parameter<std::string>("yolo8_model_path", _p.yolo8_model_path);
 	_p.yolo26_model_path = declare_parameter<std::string>("yolo26_model_path", _p.yolo26_model_path);
 	_p.yolo_input_size = declare_parameter<int>("yolo_input_size", _p.yolo_input_size);
@@ -215,6 +241,20 @@ void CubeDetectorNode::loadParameters()
 	_p.max_lock_missed          = declare_parameter<int>   ("max_lock_missed",          _p.max_lock_missed);
 	_p.lock_max_dist_px         = declare_parameter<double>("lock_max_dist_px",         _p.lock_max_dist_px);
 	_p.lock_min_size_ratio      = declare_parameter<double>("lock_min_size_ratio",      _p.lock_min_size_ratio);
+	_p.lock_search_roi_half_extent_px =
+		declare_parameter<int>("lock_search_roi_half_extent_px", _p.lock_search_roi_half_extent_px);
+	_p.lock_roi_fallback_full_frame =
+		declare_parameter<bool>("lock_roi_fallback_full_frame", _p.lock_roi_fallback_full_frame);
+	_p.mask_temporal_alpha = declare_parameter<double>("mask_temporal_alpha", _p.mask_temporal_alpha);
+
+	_p.pose_use_min_area_rect = declare_parameter<bool>("pose_use_min_area_rect", _p.pose_use_min_area_rect);
+	_p.pose_corner_subpix     = declare_parameter<bool>("pose_corner_subpix", _p.pose_corner_subpix);
+	_p.pose_subpix_win        = declare_parameter<int>("pose_subpix_win", _p.pose_subpix_win);
+
+	_p.texture_reject_enable    = declare_parameter<bool>("texture_reject_enable", _p.texture_reject_enable);
+	_p.texture_min_lab_a_stddev  =
+		declare_parameter<double>("texture_min_lab_a_stddev", _p.texture_min_lab_a_stddev);
+
 	_p.last_seen_hold_timeout_s = declare_parameter<double>("last_seen_hold_timeout_s", _p.last_seen_hold_timeout_s);
 
 	// Kalman 6-state process noise
@@ -243,14 +283,6 @@ void CubeDetectorNode::loadParameters()
 	_p.publish_prediction_when_lost =
 		declare_parameter<bool>("publish_prediction_when_lost", _p.publish_prediction_when_lost);
 
-	// Debug control
-	_p.debug_enable =
-		declare_parameter<bool>("debug.enable", _p.debug_enable);
-	_p.debug_raw_pose_enable =
-		declare_parameter<bool>("debug.raw_pose_enable", _p.debug_raw_pose_enable);
-	_p.debug_performance_enable =
-		declare_parameter<bool>("debug.performance_enable", _p.debug_performance_enable);
-
 	if (_p.detector_mode != kModeAlgorithm &&
 		_p.detector_mode != kModeYolo8n &&
 		_p.detector_mode != kModeYolo26n) {
@@ -264,6 +296,9 @@ void CubeDetectorNode::loadParameters()
 	_p.clahe_grid_size = std::max(2, _p.clahe_grid_size);
 	_p.yolo_input_size = std::max(64, _p.yolo_input_size);
 	_p.lost_grace_frames = std::max(0, _p.lost_grace_frames);
+	_p.lock_search_roi_half_extent_px = std::max(32, _p.lock_search_roi_half_extent_px);
+	_p.pose_subpix_win                 = std::max(3, _p.pose_subpix_win | 1);
+	_p.mask_temporal_alpha             = std::min(1.0, std::max(0.0, _p.mask_temporal_alpha));
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -444,9 +479,7 @@ void CubeDetectorNode::image_callback(const sensor_msgs::msg::Image::SharedPtr m
 		pose_ms = std::chrono::duration_cast<std::chrono::microseconds>(end_pose - start_pose).count() * 1e-3;
 
 		// Publish pose raw trong camera optical frame de debug/tune pinhole model.
-		if (_p.debug_raw_pose_enable) {
-			publishPose(_target_pose_camera_raw_pub, msg->header, _p.camera_frame_id, raw_x, raw_y, raw_z);
-		}
+		publishPose(_target_pose_camera_raw_pub, msg->header, _p.camera_frame_id, raw_x, raw_y, raw_z);
 
 		if (!_has_vehicle_pose) {
 			RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000,
@@ -458,10 +491,8 @@ void CubeDetectorNode::image_callback(const sensor_msgs::msg::Image::SharedPtr m
 				Eigen::Vector3d(raw_x, raw_y, raw_z));
 
 			// Publish raw NED pose truoc Kalman de danh gia transform.
-			if (_p.debug_raw_pose_enable) {
-				publishPose(_target_pose_world_raw_pub, msg->header, _p.world_frame_id,
-					pos_world.x(), pos_world.y(), pos_world.z());
-			}
+			publishPose(_target_pose_world_raw_pub, msg->header, _p.world_frame_id,
+				pos_world.x(), pos_world.y(), pos_world.z());
 
 			const auto start_kalman = std::chrono::steady_clock::now();
 			kalmanUpdate(pos_world.x(), pos_world.y(), pos_world.z(), now_ts);
@@ -542,54 +573,49 @@ void CubeDetectorNode::image_callback(const sensor_msgs::msg::Image::SharedPtr m
 	const double publish_ms =
 		std::chrono::duration_cast<std::chrono::microseconds>(end_publish - start_publish).count() * 1e-3;
 
-	if (_p.debug_enable) {
-		publishHsvDebug(cv_ptr->image, victim, msg->header);
-	}
-
+	publishHsvDebug(cv_ptr->image, victim, msg->header);
 	const double annotate_ms = 0.0;
 
-	if (_p.debug_performance_enable) {
-		const auto perf_end = std::chrono::steady_clock::now();
-		const double frame_ms =
-			std::chrono::duration_cast<std::chrono::microseconds>(perf_end - perf_start).count() * 1e-3;
-		_perf_total_ms    += frame_ms;
-		_perf_frame_count += 1;
+	const auto perf_end = std::chrono::steady_clock::now();
+	const double frame_ms =
+		std::chrono::duration_cast<std::chrono::microseconds>(perf_end - perf_start).count() * 1e-3;
+	_perf_total_ms    += frame_ms;
+	_perf_frame_count += 1;
 
-		_perf_detect_ms   += detect_ms;
-		_perf_pose_ms     += (victim.valid ? pose_ms : 0.0);
-		_perf_kalman_ms   += kalman_ms;
-		_perf_publish_ms  += publish_ms;
-		_perf_annotate_ms += annotate_ms;
-		_perf_detail_count += 1;
+	_perf_detect_ms   += detect_ms;
+	_perf_pose_ms     += (victim.valid ? pose_ms : 0.0);
+	_perf_kalman_ms   += kalman_ms;
+	_perf_publish_ms  += publish_ms;
+	_perf_annotate_ms += annotate_ms;
+	_perf_detail_count += 1;
 
-		if (perf_end - _perf_last_pub >= std::chrono::seconds(1)) {
-			const double wall_s =
-				std::chrono::duration<double>(perf_end - _perf_last_pub).count();
-			const double out_fps = (wall_s > 1e-6 && _perf_frame_count > 0)
-				? static_cast<double>(_perf_frame_count) / wall_s : 0.0;
-			const double avg_ms  = _perf_frame_count > 0
-				? _perf_total_ms / static_cast<double>(_perf_frame_count) : 0.0;
-			const double cap_fps = avg_ms > 1e-6 ? 1000.0 / avg_ms : 0.0;
+	if (perf_end - _perf_last_pub >= std::chrono::seconds(1)) {
+		const double wall_s =
+			std::chrono::duration<double>(perf_end - _perf_last_pub).count();
+		const double out_fps = (wall_s > 1e-6 && _perf_frame_count > 0)
+			? static_cast<double>(_perf_frame_count) / wall_s : 0.0;
+		const double avg_ms  = _perf_frame_count > 0
+			? _perf_total_ms / static_cast<double>(_perf_frame_count) : 0.0;
+		const double cap_fps = avg_ms > 1e-6 ? 1000.0 / avg_ms : 0.0;
 
-			std::ostringstream fps_text;
-			fps_text << "FPS=" << std::fixed << std::setprecision(1) << out_fps
-			         << " cap=" << std::setprecision(0) << cap_fps;
+		std::ostringstream fps_text;
+		fps_text << "FPS=" << std::fixed << std::setprecision(1) << out_fps
+		         << " cap=" << std::setprecision(0) << cap_fps;
 
-			std_msgs::msg::String perf_msg;
-			perf_msg.data = fps_text.str();
-			_perf_pub->publish(perf_msg);
-			_perf_overlay_text = perf_msg.data;
+		std_msgs::msg::String perf_msg;
+		perf_msg.data = fps_text.str();
+		_perf_pub->publish(perf_msg);
+		_perf_overlay_text = perf_msg.data;
 
-			_perf_last_pub     = perf_end;
-			_perf_frame_count  = 0;
-			_perf_total_ms     = 0.0;
-			_perf_detect_ms    = 0.0;
-			_perf_pose_ms      = 0.0;
-			_perf_kalman_ms    = 0.0;
-			_perf_publish_ms   = 0.0;
-			_perf_annotate_ms  = 0.0;
-			_perf_detail_count = 0;
-		}
+		_perf_last_pub     = perf_end;
+		_perf_frame_count  = 0;
+		_perf_total_ms     = 0.0;
+		_perf_detect_ms    = 0.0;
+		_perf_pose_ms      = 0.0;
+		_perf_kalman_ms    = 0.0;
+		_perf_publish_ms   = 0.0;
+		_perf_annotate_ms  = 0.0;
+		_perf_detail_count = 0;
 	}
 }
 
@@ -600,7 +626,7 @@ CubeDetectorNode::VictimModel CubeDetectorNode::detectVictimModel(const cv::Mat 
 {
 	VictimModel result;
 
-	if (!detectBoxRegion(frame, result.boxBbox, result.boxCenter)) {
+	if (!detectBoxRegion(frame, result)) {
 		return result;
 	}
 
@@ -609,100 +635,377 @@ CubeDetectorNode::VictimModel CubeDetectorNode::detectVictimModel(const cv::Mat 
 	return result;
 }
 
-bool CubeDetectorNode::detectBoxRegion(const cv::Mat &frame, cv::Rect &boxBbox, cv::Point2f &boxCenter)
+bool CubeDetectorNode::detectBoxRegion(const cv::Mat &frame, VictimModel &vm)
 {
+	vm.boxBbox          = cv::Rect();
+	vm.boxCenter        = {0.0f, 0.0f};
+	vm.pose_pixel_width = 0.0;
+	vm.pose_center      = {0.0f, 0.0f};
+
 	if (_p.detector_mode == kModeYolo8n) {
 		if (!_yolo8_loaded) return false;
-		return detectBoxRegionYolo(frame, _yolo8_net, kModeYolo8n, boxBbox, boxCenter);
+		return detectBoxRegionYolo(frame, _yolo8_net, kModeYolo8n, vm);
 	}
 
 	if (_p.detector_mode == kModeYolo26n) {
 		if (!_yolo26_loaded) return false;
-		return detectBoxRegionYolo(frame, _yolo26_net, kModeYolo26n, boxBbox, boxCenter);
+		return detectBoxRegionYolo(frame, _yolo26_net, kModeYolo26n, vm);
 	}
 
-	return detectBoxRegionAlgorithm(frame, boxBbox, boxCenter);
+	return detectBoxRegionAlgorithm(frame, vm, true);
 }
 
-bool CubeDetectorNode::makeAlgorithmMask(const cv::Mat &frame, cv::Mat &mask)
+void CubeDetectorNode::prepareAlgorithmLab(const cv::Mat &bgr, cv::Mat &lab)
 {
-	if (frame.empty()) return false;
-	cv::Mat lab;
-	cv::cvtColor(frame, lab, cv::COLOR_BGR2Lab);
-
+	cv::cvtColor(bgr, lab, cv::COLOR_BGR2Lab);
 	std::vector<cv::Mat> ch;
 	cv::split(lab, ch);
-	if (ch.size() != 3) return false;
+	if (ch.size() == 3) {
+		cv::Mat l_enhanced;
+		_clahe->apply(ch[0], l_enhanced);
+		ch[0] = l_enhanced;
+		cv::merge(ch, lab);
+	}
+}
 
-	cv::Mat l_enhanced;
-	_clahe->apply(ch[0], l_enhanced);
-	ch[0] = l_enhanced;
-	cv::merge(ch, lab);
-
+void CubeDetectorNode::buildAlgorithmColorMask(const cv::Mat &lab, const cv::Mat &bgr, cv::Mat &mask)
+{
+	cv::Mat m_primary;
 	cv::inRange(
 		lab,
 		cv::Scalar(_p.lab_l_min, _p.lab_a_min, _p.lab_b_min),
 		cv::Scalar(_p.lab_l_max, _p.lab_a_max, _p.lab_b_max),
-		mask);
+		m_primary);
 
-	cv::morphologyEx(mask, mask, cv::MORPH_OPEN, _morph_kernel);
-	cv::morphologyEx(mask, mask, cv::MORPH_CLOSE, _morph_kernel);
-	return true;
-}
+	mask = m_primary;
 
-bool CubeDetectorNode::detectBoxRegionAlgorithm(const cv::Mat &frame, cv::Rect &boxBbox, cv::Point2f &boxCenter)
-{
-	cv::Mat mask;
-	if (!makeAlgorithmMask(frame, mask)) return false;
+	if (_p.lab_enable_overexposed_mask) {
+		cv::Mat mo;
+		cv::inRange(
+			lab,
+			cv::Scalar(_p.lab_ov_l_min, _p.lab_ov_a_min, _p.lab_ov_b_min),
+			cv::Scalar(_p.lab_ov_l_max, _p.lab_ov_a_max, _p.lab_ov_b_max),
+			mo);
+		cv::bitwise_or(mask, mo, mask);
+	}
 
-	const cv::Point2f img_center(frame.cols * 0.5f, frame.rows * 0.5f);
+	if (_p.lab_enable_shadow_mask) {
+		cv::Mat ms;
+		cv::inRange(
+			lab,
+			cv::Scalar(_p.lab_sh_l_min, _p.lab_sh_a_min, _p.lab_sh_b_min),
+			cv::Scalar(_p.lab_sh_l_max, _p.lab_sh_a_max, _p.lab_sh_b_max),
+			ms);
+		cv::bitwise_or(mask, ms, mask);
+	}
 
-	std::vector<std::vector<cv::Point>> contours;
-	cv::findContours(mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
-
-	bool   found     = false;
-	double bestScore = -1e18;
-
-	for (const auto &contour : contours) {
-		const double area = cv::contourArea(contour);
-		if (area < _p.min_box_area || area > _p.max_box_area) continue;
-
-		const double perimeter = cv::arcLength(contour, true);
-		if (perimeter < 1e-6) continue;
-
-		const cv::Rect bbox = cv::boundingRect(contour);
-		if (bbox.width <= 0 || bbox.height <= 0) continue;
-
-		const cv::Point2f center(
-			bbox.x + bbox.width  * 0.5f,
-			bbox.y + bbox.height * 0.5f);
-
-		const double aspect      = static_cast<double>(bbox.width) / bbox.height;
-		const double bbox_area   = static_cast<double>(bbox.width * bbox.height);
-		const double fill_ratio  = area / std::max(1.0, bbox_area);
-		const double circularity = 4.0 * M_PI * area / (perimeter * perimeter);
-
-		if (circularity > _p.max_circularity) continue;
-		if (aspect < _p.min_aspect_ratio || aspect > _p.max_aspect_ratio) continue;
-		if (fill_ratio < _p.min_fill_ratio) continue;
-
-		double score = 0.0;
-		if (_lock.locked) {
-			if (!isLockedCandidateValid(bbox, center)) continue;
-			score = scoreLockedCandidate(center, bbox, area);
-		} else {
-			score = scoreUnlockedCandidate(area, fill_ratio, circularity, center, img_center);
-		}
-
-		if (!found || score > bestScore) {
-			bestScore = score;
-			boxBbox   = bbox;
-			boxCenter = center;
-			found     = true;
+	if (_p.lab_ratio_ba_gate) {
+		std::vector<cv::Mat> ch;
+		cv::split(lab, ch);
+		if (ch.size() == 3) {
+			cv::Mat ba_diff;
+			cv::subtract(ch[2], ch[1], ba_diff, cv::noArray(), CV_16S);
+			cv::Mat ba_mask;
+			cv::inRange(
+				ba_diff,
+				cv::Scalar(static_cast<double>(_p.lab_ratio_ba_min)),
+				cv::Scalar(32767.0),
+				ba_mask);
+			cv::bitwise_and(mask, ba_mask, mask);
 		}
 	}
 
-	return found;
+	if (_p.bgr_ratio_or_branch && !bgr.empty() && bgr.type() == CV_8UC3) {
+		std::vector<cv::Mat> bc;
+		cv::split(bgr, bc);
+		if (bc.size() == 3) {
+			cv::Mat Rf, Gf, Bf;
+			bc[2].convertTo(Rf, CV_32F);
+			bc[1].convertTo(Gf, CV_32F);
+			bc[0].convertTo(Bf, CV_32F);
+			cv::Mat mg, mb, mor;
+			cv::compare(Rf, _p.bgr_r_over_g * Gf, mg, cv::CMP_GT);
+			cv::compare(Rf, _p.bgr_r_over_b * Bf, mb, cv::CMP_GT);
+			cv::bitwise_and(mg, mb, mor);
+			cv::bitwise_or(mask, mor, mask);
+		}
+	}
+}
+
+void CubeDetectorNode::applyAlgorithmMorphology(cv::Mat &mask)
+{
+	cv::morphologyEx(mask, mask, cv::MORPH_OPEN, _morph_kernel);
+	cv::morphologyEx(mask, mask, cv::MORPH_CLOSE, _morph_kernel);
+}
+
+void CubeDetectorNode::applyMaskTemporalFullFrame(cv::Mat &mask_full)
+{
+	if (mask_full.empty()) return;
+	if (_p.mask_temporal_alpha <= 1e-9) {
+		return;
+	}
+
+	const float a = static_cast<float>(_p.mask_temporal_alpha);
+	cv::Mat cur_f;
+	mask_full.convertTo(cur_f, CV_32F, 1.0 / 255.0);
+
+	if (_mask_temporal_prev.size() != mask_full.size() ||
+	    _mask_temporal_prev.type() != CV_32F) {
+		_mask_temporal_prev = cur_f.clone();
+		return;
+	}
+
+	cv::Mat blended = a * cur_f + (1.0f - a) * _mask_temporal_prev;
+	_mask_temporal_prev = blended.clone();
+
+	cv::Mat out8;
+	cv::threshold(blended, out8, 0.5, 255.0, cv::THRESH_BINARY);
+	out8.convertTo(mask_full, CV_8U);
+}
+
+bool CubeDetectorNode::makeAlgorithmMaskOnBgr(const cv::Mat &bgr, cv::Mat &mask)
+{
+	if (bgr.empty()) return false;
+	cv::Mat lab;
+	prepareAlgorithmLab(bgr, lab);
+	buildAlgorithmColorMask(lab, bgr, mask);
+	applyAlgorithmMorphology(mask);
+	return true;
+}
+
+void CubeDetectorNode::makeAlgorithmMaskStagesOnBgr(
+	const cv::Mat &bgr,
+	cv::Mat &lab_bgr_vis,
+	cv::Mat &mask_after_color,
+	cv::Mat &mask_after_morph)
+{
+	if (bgr.empty()) return;
+	cv::Mat lab;
+	prepareAlgorithmLab(bgr, lab);
+	cv::cvtColor(lab, lab_bgr_vis, cv::COLOR_Lab2BGR);
+	buildAlgorithmColorMask(lab, bgr, mask_after_color);
+	mask_after_morph = mask_after_color.clone();
+	applyAlgorithmMorphology(mask_after_morph);
+}
+
+bool CubeDetectorNode::makeAlgorithmMask(const cv::Mat &frame, cv::Mat &mask)
+{
+	return makeAlgorithmMaskOnBgr(frame, mask);
+}
+
+cv::Rect CubeDetectorNode::computeLockedSearchRoi(const cv::Size &frame_size) const
+{
+	const int cx = static_cast<int>(std::lround(_lock.center.x));
+	const int cy = static_cast<int>(std::lround(_lock.center.y));
+	const int he = _p.lock_search_roi_half_extent_px;
+	const int l  = cx - he;
+	const int t  = cy - he;
+	const int w  = he * 2;
+	const int h  = he * 2;
+	cv::Rect r(l, t, w, h);
+	return r & cv::Rect(0, 0, frame_size.width, frame_size.height);
+}
+
+bool CubeDetectorNode::contourTextureAcceptable(
+	const cv::Mat &lab, const std::vector<cv::Point> &contour_work) const
+{
+	if (!_p.texture_reject_enable || lab.empty() || contour_work.empty()) {
+		return true;
+	}
+
+	cv::Rect b = cv::boundingRect(contour_work);
+	b &= cv::Rect(0, 0, lab.cols, lab.rows);
+	if (b.width <= 0 || b.height <= 0) return false;
+
+	cv::Mat roi_lab = lab(b);
+	std::vector<cv::Mat> pch;
+	cv::split(roi_lab, pch);
+	if (pch.size() < 2) return true;
+
+	cv::Mat mask_roi = cv::Mat::zeros(b.size(), CV_8U);
+	std::vector<cv::Point> shifted;
+	shifted.reserve(contour_work.size());
+	for (const auto &p : contour_work) {
+		shifted.emplace_back(p.x - b.x, p.y - b.y);
+	}
+	std::vector<std::vector<cv::Point>> one = {shifted};
+	cv::drawContours(mask_roi, one, 0, cv::Scalar(255), cv::FILLED, cv::LINE_8);
+
+	cv::Scalar mean, stddev;
+	cv::meanStdDev(pch[1], mean, stddev, mask_roi);
+
+	return stddev[0] >= _p.texture_min_lab_a_stddev;
+}
+
+bool CubeDetectorNode::detectBoxRegionAlgorithm(const cv::Mat &frame, VictimModel &vm, bool allow_locked_roi)
+{
+	const cv::Rect full(0, 0, frame.cols, frame.rows);
+	const bool      use_roi = allow_locked_roi && _lock.locked;
+
+	cv::Rect roi_rect = full;
+	if (use_roi) {
+		roi_rect = computeLockedSearchRoi(frame.size());
+		if (roi_rect.width < 24 || roi_rect.height < 24) {
+			roi_rect = full;
+		}
+	}
+
+	const bool roi_is_crop =
+		use_roi && (roi_rect.x != full.x || roi_rect.y != full.y || roi_rect.width != full.width ||
+		            roi_rect.height != full.height);
+
+	cv::Mat saved_temporal_prev = _mask_temporal_prev.clone();
+
+	const auto runContourPass = [&](const cv::Mat &mask_full, const cv::Rect &r, const cv::Mat &work_bgr,
+	                                const cv::Mat &lab_tex) -> bool {
+		cv::Mat                 mask_work = mask_full(r);
+		std::vector<std::vector<cv::Point>> contours_roi;
+		cv::findContours(mask_work, contours_roi, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+
+		const cv::Point2f img_center(frame.cols * 0.5f, frame.rows * 0.5f);
+		const cv::Point   off(r.x, r.y);
+
+		bool   found     = false;
+		double bestScore = -1e18;
+
+		for (const auto &c_roi : contours_roi) {
+			std::vector<cv::Point> contour;
+			contour.reserve(c_roi.size());
+			for (const auto &pt : c_roi) {
+				contour.emplace_back(pt.x + off.x, pt.y + off.y);
+			}
+
+			const double area = cv::contourArea(contour);
+			if (area < _p.min_box_area || area > _p.max_box_area) continue;
+
+			const double perimeter = cv::arcLength(contour, true);
+			if (perimeter < 1e-6) continue;
+
+			if (_p.texture_reject_enable && !lab_tex.empty() &&
+			    !contourTextureAcceptable(lab_tex, c_roi)) {
+				continue;
+			}
+
+			const cv::Rect bbox = cv::boundingRect(contour);
+			if (bbox.width <= 0 || bbox.height <= 0) continue;
+
+			const cv::Point2f center(
+				bbox.x + bbox.width * 0.5f,
+				bbox.y + bbox.height * 0.5f);
+
+			const double aspect      = static_cast<double>(bbox.width) / bbox.height;
+			const double bbox_area   = static_cast<double>(bbox.width * bbox.height);
+			const double fill_ratio  = area / std::max(1.0, bbox_area);
+			const double circularity = 4.0 * M_PI * area / (perimeter * perimeter);
+
+			if (circularity > _p.max_circularity) continue;
+			if (aspect < _p.min_aspect_ratio || aspect > _p.max_aspect_ratio) continue;
+			if (fill_ratio < _p.min_fill_ratio) continue;
+
+			double       pose_pw = static_cast<double>(bbox.width);
+			cv::Point2f pose_pc  = center;
+
+			if (_p.pose_use_min_area_rect) {
+				if (_p.pose_corner_subpix && c_roi.size() >= 4) {
+					cv::Mat gray;
+					cv::cvtColor(work_bgr, gray, cv::COLOR_BGR2GRAY);
+					std::vector<cv::Point2f> pts;
+					pts.reserve(c_roi.size());
+					for (const auto &p : c_roi) {
+						pts.emplace_back(static_cast<float>(p.x), static_cast<float>(p.y));
+					}
+					const int w = std::max(3, _p.pose_subpix_win | 1);
+					cv::cornerSubPix(
+						gray,
+						pts,
+						cv::Size(w, w),
+						cv::Size(-1, -1),
+						cv::TermCriteria(cv::TermCriteria::COUNT | cv::TermCriteria::EPS, 30, 0.05));
+					const cv::RotatedRect rr = cv::minAreaRect(pts);
+					pose_pw = static_cast<double>(std::max(rr.size.width, rr.size.height));
+					pose_pc = rr.center;
+					pose_pc.x += static_cast<float>(off.x);
+					pose_pc.y += static_cast<float>(off.y);
+				} else {
+					const cv::RotatedRect rr = cv::minAreaRect(contour);
+					pose_pw = static_cast<double>(std::max(rr.size.width, rr.size.height));
+					pose_pc = rr.center;
+				}
+			}
+
+			double score = 0.0;
+			if (_lock.locked) {
+				if (!isLockedCandidateValid(bbox, center)) continue;
+				score = scoreLockedCandidate(center, bbox, area);
+			} else {
+				score = scoreUnlockedCandidate(area, fill_ratio, circularity, center, img_center);
+			}
+
+			if (!found || score > bestScore) {
+				bestScore           = score;
+				vm.boxBbox          = bbox;
+				vm.boxCenter        = center;
+				vm.pose_pixel_width = pose_pw;
+				vm.pose_center      = pose_pc;
+				found               = true;
+			}
+		}
+		return found;
+	};
+
+	const auto buildRawMaskInRect = [&](const cv::Rect &r, cv::Mat &mask_full) -> bool {
+		cv::Mat work = frame(r);
+		cv::Mat mask_roi;
+		if (!makeAlgorithmMaskOnBgr(work, mask_roi)) return false;
+		mask_full = cv::Mat::zeros(frame.rows, frame.cols, CV_8U);
+		mask_roi.copyTo(mask_full(r));
+		return true;
+	};
+
+	// ── Pass 1: ROI (when locked) ───────────────────────────────
+	if (roi_is_crop) {
+		cv::Mat raw_full;
+		if (!buildRawMaskInRect(roi_rect, raw_full)) {
+			_mask_temporal_prev = saved_temporal_prev;
+			return false;
+		}
+		_dbg_algorithm_mask_pre_temporal = raw_full.clone();
+		applyMaskTemporalFullFrame(raw_full);
+		_dbg_algorithm_mask_full = raw_full.clone();
+		_last_debug_roi          = roi_rect;
+
+		cv::Mat lab_tex;
+		if (_p.texture_reject_enable) {
+			prepareAlgorithmLab(frame(roi_rect), lab_tex);
+		}
+
+		if (runContourPass(raw_full, roi_rect, frame(roi_rect), lab_tex)) {
+			return true;
+		}
+
+		_mask_temporal_prev = saved_temporal_prev;
+
+		if (!_p.lock_roi_fallback_full_frame) {
+			return false;
+		}
+	}
+
+	// ── Pass 2: full frame (search hoac fallback) ───────────────
+	cv::Mat raw_full2;
+	if (!buildRawMaskInRect(full, raw_full2)) {
+		return false;
+	}
+	_dbg_algorithm_mask_pre_temporal = raw_full2.clone();
+	applyMaskTemporalFullFrame(raw_full2);
+	_dbg_algorithm_mask_full = raw_full2.clone();
+	_last_debug_roi          = full;
+
+	cv::Mat lab_tex2;
+	if (_p.texture_reject_enable) {
+		prepareAlgorithmLab(frame, lab_tex2);
+	}
+
+	return runContourPass(raw_full2, full, frame, lab_tex2);
 }
 
 bool CubeDetectorNode::loadYoloModel(cv::dnn::Net &net, const std::string &model_path, const std::string &name)
@@ -737,8 +1040,7 @@ bool CubeDetectorNode::detectBoxRegionYolo(
 	const cv::Mat &frame,
 	cv::dnn::Net &net,
 	const std::string &pipeline_name,
-	cv::Rect &boxBbox,
-	cv::Point2f &boxCenter)
+	VictimModel &vm)
 {
 	if (frame.empty()) return false;
 	const int input_size = _p.yolo_input_size;
@@ -812,10 +1114,12 @@ bool CubeDetectorNode::detectBoxRegionYolo(
 	for (int idx : indices) {
 		if (confidences[idx] > confidences[best_idx]) best_idx = idx;
 	}
-	boxBbox = boxes[best_idx];
-	boxCenter = cv::Point2f(
-		boxBbox.x + 0.5f * static_cast<float>(boxBbox.width),
-		boxBbox.y + 0.5f * static_cast<float>(boxBbox.height));
+	vm.boxBbox = boxes[best_idx];
+	vm.boxCenter = cv::Point2f(
+		vm.boxBbox.x + 0.5f * static_cast<float>(vm.boxBbox.width),
+		vm.boxBbox.y + 0.5f * static_cast<float>(vm.boxBbox.height));
+	vm.pose_pixel_width = static_cast<double>(vm.boxBbox.width);
+	vm.pose_center      = vm.boxCenter;
 
 	RCLCPP_DEBUG_THROTTLE(
 		get_logger(),
@@ -824,7 +1128,7 @@ bool CubeDetectorNode::detectBoxRegionYolo(
 		"[%s] det conf=%.3f box=(%d,%d,%d,%d)",
 		pipeline_name.c_str(),
 		confidences[best_idx],
-		boxBbox.x, boxBbox.y, boxBbox.width, boxBbox.height);
+		vm.boxBbox.x, vm.boxBbox.y, vm.boxBbox.width, vm.boxBbox.height);
 	return true;
 }
 
@@ -927,7 +1231,11 @@ void CubeDetectorNode::estimatePose(
 	const double cx = _camera_matrix.at<double>(0, 2);
 	const double cy = _camera_matrix.at<double>(1, 2);
 
-	const double pixel_width = target.boxBbox.width;
+	const bool        use_pose_geom = target.pose_pixel_width > 1e-6;
+	const double      pixel_width =
+		use_pose_geom ? target.pose_pixel_width : static_cast<double>(target.boxBbox.width);
+	const cv::Point2f cc = use_pose_geom ? target.pose_center : target.boxCenter;
+
 	if (pixel_width < 1.0) {
 		x = 0.0;
 		y = 0.0;
@@ -936,8 +1244,8 @@ void CubeDetectorNode::estimatePose(
 	}
 
 	z = (fx * _p.box_width_m) / pixel_width;
-	x = (target.boxCenter.x - cx) * z / fx;
-	y = (target.boxCenter.y - cy) * z / fy;
+	x = (cc.x - cx) * z / fx;
+	y = (cc.y - cy) * z / fy;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1150,71 +1458,163 @@ void CubeDetectorNode::publishHsvDebug(
 	const VictimModel &victim,
 	const std_msgs::msg::Header &header)
 {
-	if (!_p.debug_enable) return;
-	if (!_hsv_debug_pub) return;
 	if (_hsv_debug_pub->get_subscription_count() == 0) return;
 
-	cv::Mat mask;
-	if (!makeAlgorithmMask(frame, mask)) return;
+	const auto maskToGreenBgr = [](const cv::Mat &m) -> cv::Mat {
+		cv::Mat out(m.size(), CV_8UC3, cv::Scalar(0, 0, 0));
+		if (!m.empty()) {
+			out.setTo(cv::Scalar(0, 220, 0), m);
+		}
+		return out;
+	};
 
-	cv::Mat left_panel(frame.size(), CV_8UC3, cv::Scalar(0, 0, 0));
-	left_panel.setTo(cv::Scalar(0, 220, 0), mask);
+	const auto annotateRoiAndBox = [&](cv::Mat &panel) {
+		if (_last_debug_roi.width > 0 && _last_debug_roi.height > 0) {
+			cv::rectangle(panel, _last_debug_roi, cv::Scalar(0, 180, 255), 2, cv::LINE_AA);
+		}
+		if (victim.valid && victim.boxBbox.area() > 0) {
+			cv::rectangle(panel, victim.boxBbox, cv::Scalar(0, 255, 255), 2, cv::LINE_AA);
+			cv::circle(panel,
+				cv::Point(static_cast<int>(victim.boxCenter.x),
+				          static_cast<int>(victim.boxCenter.y)),
+				5, cv::Scalar(0, 255, 255), -1, cv::LINE_AA);
+		}
+	};
 
-	if (victim.valid && victim.boxBbox.area() > 0) {
-		cv::rectangle(left_panel, victim.boxBbox, cv::Scalar(0, 255, 255), 2, cv::LINE_AA);
-		cv::circle(left_panel,
-			cv::Point(static_cast<int>(victim.boxCenter.x),
-			          static_cast<int>(victim.boxCenter.y)),
-			5, cv::Scalar(0, 255, 255), -1, cv::LINE_AA);
+	const auto annotateOverlayPanel = [&](cv::Mat &right_panel, const cv::Mat &mask) {
+		cv::Mat blurred_bg;
+		cv::GaussianBlur(right_panel, blurred_bg, cv::Size(0, 0), 3.0);
+		cv::Mat mask_inv;
+		cv::bitwise_not(mask, mask_inv);
+		blurred_bg.copyTo(right_panel, mask_inv);
+		right_panel.setTo(cv::Scalar(0, 140, 255), mask);
+		if (victim.valid && victim.boxBbox.area() > 0) {
+			if (_last_debug_roi.width > 0 && _last_debug_roi.height > 0) {
+				cv::rectangle(right_panel, _last_debug_roi, cv::Scalar(0, 180, 255), 2, cv::LINE_AA);
+			}
+			cv::rectangle(right_panel, victim.boxBbox, cv::Scalar(0, 80, 255), 2, cv::LINE_AA);
+			cv::circle(right_panel,
+				cv::Point(static_cast<int>(victim.boxCenter.x),
+				          static_cast<int>(victim.boxCenter.y)),
+				5, cv::Scalar(0, 80, 255), -1, cv::LINE_AA);
+		}
+		cv::putText(right_panel,
+			victim.valid ? "[DETECTED]" : "[SEARCHING]",
+			cv::Point(10, 28), cv::FONT_HERSHEY_SIMPLEX, 0.85,
+			victim.valid ? cv::Scalar(0, 200, 80) : cv::Scalar(80, 80, 255),
+			2, cv::LINE_AA);
+	};
+
+	cv::Mat mask_final;
+	if (!_dbg_algorithm_mask_full.empty() && _dbg_algorithm_mask_full.size() == frame.size()) {
+		mask_final = _dbg_algorithm_mask_full;
+	} else if (!makeAlgorithmMask(frame, mask_final)) {
+		return;
 	}
 
-	cv::putText(left_panel, "Algorithm Mask",
-		cv::Point(10, 28), cv::FONT_HERSHEY_SIMPLEX, 0.85,
+	// YOLO: giu layout 2 panel (khong co pipeline LAB tren detection).
+	if (_p.detector_mode != kModeAlgorithm) {
+		cv::Mat left_panel = maskToGreenBgr(mask_final);
+		annotateRoiAndBox(left_panel);
+		cv::putText(left_panel, "Mask (fallback LAB)",
+			cv::Point(10, 28), cv::FONT_HERSHEY_SIMPLEX, 0.85,
+			cv::Scalar(255, 255, 255), 2, cv::LINE_AA);
+		cv::putText(left_panel, std::string("Mode=") + _p.detector_mode,
+			cv::Point(10, 55), cv::FONT_HERSHEY_SIMPLEX, 0.55,
+			cv::Scalar(200, 200, 200), 1, cv::LINE_AA);
+
+		cv::Mat right_panel = frame.clone();
+		annotateOverlayPanel(right_panel, mask_final);
+
+		cv::Mat combined;
+		cv::hconcat(left_panel, right_panel, combined);
+		cv::line(combined,
+			cv::Point(frame.cols, 0),
+			cv::Point(frame.cols, frame.rows),
+			cv::Scalar(100, 100, 100), 2);
+
+		cv_bridge::CvImage cv_img;
+		cv_img.header   = header;
+		cv_img.encoding = sensor_msgs::image_encodings::BGR8;
+		cv_img.image    = combined;
+		_hsv_debug_pub->publish(*cv_img.toImageMsg());
+		return;
+	}
+
+	// Algorithm: luoi 2x3 — tung buoc xu ly tren full frame (cung canvas voi detection cuoi).
+	cv::Mat lab_bgr, mask_color, mask_morph;
+	makeAlgorithmMaskStagesOnBgr(frame, lab_bgr, mask_color, mask_morph);
+
+	cv::Mat p_lab = lab_bgr.empty() ? cv::Mat(frame.size(), CV_8UC3, cv::Scalar(0, 0, 0)) : lab_bgr.clone();
+	cv::putText(p_lab, "1: LAB + CLAHE (BGR)",
+		cv::Point(10, 28), cv::FONT_HERSHEY_SIMPLEX, 0.72,
+		cv::Scalar(255, 255, 255), 2, cv::LINE_AA);
+
+	cv::Mat p_color = maskToGreenBgr(mask_color);
+	annotateRoiAndBox(p_color);
+	cv::putText(p_color, "2: Mask mau (pre-morph)",
+		cv::Point(10, 28), cv::FONT_HERSHEY_SIMPLEX, 0.72,
+		cv::Scalar(255, 255, 255), 2, cv::LINE_AA);
+
+	cv::Mat p_morph = maskToGreenBgr(mask_morph);
+	annotateRoiAndBox(p_morph);
+	cv::putText(p_morph, "3: Sau morphology (full frame)",
+		cv::Point(10, 28), cv::FONT_HERSHEY_SIMPLEX, 0.58,
+		cv::Scalar(255, 255, 255), 2, cv::LINE_AA);
+
+	cv::Mat mask_pre_temp = mask_morph;
+	if (!_dbg_algorithm_mask_pre_temporal.empty() &&
+	    _dbg_algorithm_mask_pre_temporal.size() == frame.size()) {
+		mask_pre_temp = _dbg_algorithm_mask_pre_temporal;
+	}
+	cv::Mat p_pre_t = maskToGreenBgr(mask_pre_temp);
+	annotateRoiAndBox(p_pre_t);
+	cv::putText(p_pre_t, "4: Truoc temporal (mask detection)",
+		cv::Point(10, 28), cv::FONT_HERSHEY_SIMPLEX, 0.55,
+		cv::Scalar(255, 255, 255), 2, cv::LINE_AA);
+
+	cv::Mat p_final = maskToGreenBgr(mask_final);
+	annotateRoiAndBox(p_final);
+	cv::putText(p_final, "5: Sau temporal (vao contour)",
+		cv::Point(10, 28), cv::FONT_HERSHEY_SIMPLEX, 0.65,
+		cv::Scalar(255, 255, 255), 2, cv::LINE_AA);
+
+	cv::Mat p_overlay = frame.clone();
+	annotateOverlayPanel(p_overlay, mask_final);
+	cv::putText(p_overlay, "6: Overlay",
+		cv::Point(10, 55), cv::FONT_HERSHEY_SIMPLEX, 0.72,
 		cv::Scalar(255, 255, 255), 2, cv::LINE_AA);
 
 	{
 		std::ostringstream ss;
 		ss << "Mode=" << _p.detector_mode
-		   << " LAB(L:" << _p.lab_l_min << "-" << _p.lab_l_max
-		   << " A:" << _p.lab_a_min << "-" << _p.lab_a_max
-		   << " B:" << _p.lab_b_min << "-" << _p.lab_b_max << ")";
-		cv::putText(left_panel, ss.str(),
-			cv::Point(10, 55), cv::FONT_HERSHEY_SIMPLEX, 0.50,
-			cv::Scalar(200, 200, 200), 1, cv::LINE_AA);
+		   << " LAB L" << _p.lab_l_min << "-" << _p.lab_l_max
+		   << " a" << _p.lab_a_min << "-" << _p.lab_a_max
+		   << " b" << _p.lab_b_min << "-" << _p.lab_b_max;
+		cv::putText(p_overlay, ss.str(),
+			cv::Point(10, frame.rows - 14), cv::FONT_HERSHEY_SIMPLEX, 0.48,
+			cv::Scalar(220, 220, 220), 1, cv::LINE_AA);
 	}
 
-	cv::Mat right_panel = frame.clone();
-
-	cv::Mat blurred_bg;
-	cv::GaussianBlur(right_panel, blurred_bg, cv::Size(0, 0), 3.0);
-
-	cv::Mat mask_inv;
-	cv::bitwise_not(mask, mask_inv);
-	blurred_bg.copyTo(right_panel, mask_inv);
-
-	right_panel.setTo(cv::Scalar(0, 140, 255), mask);
-
-	if (victim.valid && victim.boxBbox.area() > 0) {
-		cv::rectangle(right_panel, victim.boxBbox, cv::Scalar(0, 80, 255), 2, cv::LINE_AA);
-		cv::circle(right_panel,
-			cv::Point(static_cast<int>(victim.boxCenter.x),
-			          static_cast<int>(victim.boxCenter.y)),
-			5, cv::Scalar(0, 80, 255), -1, cv::LINE_AA);
-	}
-
-	cv::putText(right_panel,
-		victim.valid ? "[DETECTED]" : "[SEARCHING]",
-		cv::Point(10, 28), cv::FONT_HERSHEY_SIMPLEX, 0.85,
-		victim.valid ? cv::Scalar(0, 200, 80) : cv::Scalar(80, 80, 255),
-		2, cv::LINE_AA);
-
-	cv::Mat combined;
-	cv::hconcat(left_panel, right_panel, combined);
+	cv::Mat row1, row2, combined;
+	cv::hconcat(p_lab, p_color, row1);
+	cv::hconcat(row1, p_morph, row1);
+	cv::hconcat(p_pre_t, p_final, row2);
+	cv::hconcat(row2, p_overlay, row2);
+	cv::vconcat(row1, row2, combined);
 
 	cv::line(combined,
+		cv::Point(0, frame.rows),
+		cv::Point(combined.cols, frame.rows),
+		cv::Scalar(80, 80, 80), 2);
+	cv::line(combined,
 		cv::Point(frame.cols, 0),
-		cv::Point(frame.cols, frame.rows),
-		cv::Scalar(100, 100, 100), 2);
+		cv::Point(frame.cols, combined.rows),
+		cv::Scalar(80, 80, 80), 2);
+	cv::line(combined,
+		cv::Point(frame.cols * 2, 0),
+		cv::Point(frame.cols * 2, combined.rows),
+		cv::Scalar(80, 80, 80), 2);
 
 	cv_bridge::CvImage cv_img;
 	cv_img.header   = header;
@@ -1234,6 +1634,11 @@ void CubeDetectorNode::resetLockState()
 
 	_has_last_pose = false;
 	_last_x = _last_y = _last_z = 0.0;
+
+	_mask_temporal_prev.release();
+	_dbg_algorithm_mask_full.release();
+	_dbg_algorithm_mask_pre_temporal.release();
+	_last_debug_roi = cv::Rect();
 }
 
 // ═══════════════════════════════════════════════════════════════════

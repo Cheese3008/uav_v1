@@ -24,6 +24,7 @@ CameraUsbGstNode::CameraUsbGstNode()
         gst_init(nullptr, nullptr);
 
         loadParameters();
+        loadCameraCalibration();
 
         imagePub_ = this->create_publisher<sensor_msgs::msg::Image>(
             topicName_,
@@ -47,6 +48,8 @@ CameraUsbGstNode::CameraUsbGstNode()
         RCLCPP_INFO(this->get_logger(), "Frame ID          : %s", frameId_.c_str());
         RCLCPP_INFO(this->get_logger(), "Image Topic       : %s", topicName_.c_str());
         RCLCPP_INFO(this->get_logger(), "CameraInfo Topic  : %s", cameraInfoTopic_.c_str());
+        RCLCPP_INFO(this->get_logger(), "Camera Name       : %s", cameraName_.c_str());
+        RCLCPP_INFO(this->get_logger(), "CameraInfo URL    : %s", cameraInfoUrl_.c_str());
         RCLCPP_INFO(this->get_logger(), "Size              : %dx%d @ %d FPS", width_, height_, fps_);
         RCLCPP_INFO(this->get_logger(), "Mode              : %s", useMjpeg_ ? "MJPG" : "YUYV");
     }
@@ -67,12 +70,13 @@ void CameraUsbGstNode::loadParameters()
 {
     /**
      * Mô tả:
-     *     Đọc parameter cấu hình USB camera.
+     *     Đọc parameter cấu hình USB camera và file calibration.
      *
      * Input:
      *     ROS2 parameters:
      *         device_path, width, height, fps, frame_id,
-     *         topic_name, camera_info_topic, use_mjpeg.
+     *         topic_name, camera_info_topic, use_mjpeg,
+     *         camera_name, camera_info_url.
      *
      * Logic:
      *     Khai báo giá trị mặc định, đọc parameter, kiểm tra dữ liệu hợp lệ.
@@ -89,6 +93,11 @@ void CameraUsbGstNode::loadParameters()
     this->declare_parameter<std::string>("camera_info_topic", "/camera_usb/camera_info");
     this->declare_parameter<bool>("use_mjpeg", true);
 
+    this->declare_parameter<std::string>("camera_name", "camera_usb");
+    this->declare_parameter<std::string>(
+        "camera_info_url",
+        "file:///home/pihuy/tracktor-beam/camera_info.yaml");
+
     devicePath_ = this->get_parameter("device_path").as_string();
     width_ = this->get_parameter("width").as_int();
     height_ = this->get_parameter("height").as_int();
@@ -97,6 +106,10 @@ void CameraUsbGstNode::loadParameters()
     topicName_ = this->get_parameter("topic_name").as_string();
     cameraInfoTopic_ = this->get_parameter("camera_info_topic").as_string();
     useMjpeg_ = this->get_parameter("use_mjpeg").as_bool();
+
+    cameraName_ = this->get_parameter("camera_name").as_string();
+    cameraInfoUrl_ = normalizeCameraInfoUrl(
+        this->get_parameter("camera_info_url").as_string());
 
     if (devicePath_.empty())
     {
@@ -118,9 +131,111 @@ void CameraUsbGstNode::loadParameters()
         throw std::runtime_error("frame_id dang rong");
     }
 
+    if (cameraName_.empty())
+    {
+        throw std::runtime_error("camera_name dang rong");
+    }
+
+    if (cameraInfoUrl_.empty())
+    {
+        throw std::runtime_error("camera_info_url dang rong");
+    }
+
     if (width_ <= 0 || height_ <= 0 || fps_ <= 0)
     {
         throw std::runtime_error("width, height hoac fps khong hop le");
+    }
+}
+
+std::string CameraUsbGstNode::normalizeCameraInfoUrl(
+    const std::string &cameraInfoUrl) const
+{
+    /**
+     * Mô tả:
+     *     Chuẩn hóa đường dẫn camera_info.yaml.
+     *
+     * Input:
+     *     cameraInfoUrl: đường dẫn từ parameter.
+     *
+     * Logic:
+     *     Nếu URL đã có "://" thì giữ nguyên.
+     *     Nếu là đường dẫn thường, ví dụ /home/.../camera_info.yaml,
+     *     thì thêm tiền tố file://.
+     *
+     * Output:
+     *     URL hợp lệ cho camera_info_manager.
+     */
+    if (cameraInfoUrl.empty())
+    {
+        return "";
+    }
+
+    if (cameraInfoUrl.find("://") != std::string::npos)
+    {
+        return cameraInfoUrl;
+    }
+
+    return "file://" + cameraInfoUrl;
+}
+
+void CameraUsbGstNode::loadCameraCalibration()
+{
+    /**
+     * Mô tả:
+     *     Load file calibration bằng camera_info_manager.
+     *
+     * Input:
+     *     cameraName_, cameraInfoUrl_.
+     *
+     * Logic:
+     *     Tạo CameraInfoManager, load camera_info_url.
+     *     Nếu load thất bại thì node vẫn chạy nhưng CameraInfo sẽ là tối thiểu.
+     *
+     * Output:
+     *     cameraInfoManager_ sẵn sàng trả về CameraInfo nếu calibrated.
+     */
+    cameraInfoManager_ =
+        std::make_unique<camera_info_manager::CameraInfoManager>(
+            this,
+            cameraName_);
+
+    const bool loadOk = cameraInfoManager_->loadCameraInfo(cameraInfoUrl_);
+
+    if (!loadOk)
+    {
+        RCLCPP_WARN(
+            this->get_logger(),
+            "Khong load duoc camera_info tu: %s. Node se publish CameraInfo toi thieu.",
+            cameraInfoUrl_.c_str());
+
+        return;
+    }
+
+    const sensor_msgs::msg::CameraInfo cameraInfoMsg =
+        cameraInfoManager_->getCameraInfo();
+
+    RCLCPP_INFO(
+        this->get_logger(),
+        "Da load camera_info tu: %s",
+        cameraInfoUrl_.c_str());
+
+    RCLCPP_INFO(
+        this->get_logger(),
+        "CameraInfo YAML size: %ux%u",
+        cameraInfoMsg.width,
+        cameraInfoMsg.height);
+
+    if (cameraInfoMsg.width != static_cast<uint32_t>(width_) ||
+        cameraInfoMsg.height != static_cast<uint32_t>(height_))
+    {
+        RCLCPP_WARN(
+            this->get_logger(),
+            "Kich thuoc camera_info.yaml (%ux%u) khac voi node config (%dx%d). "
+            "Nen calibrate dung do phan giai dang chay de pose/khoang cach chinh xac.",
+            cameraInfoMsg.width,
+            cameraInfoMsg.height,
+            width_,
+            height_);
     }
 }
 
@@ -136,10 +251,11 @@ std::string CameraUsbGstNode::buildPipelineString() const
      * Logic:
      *     Nếu use_mjpeg=true thì đọc MJPG, parse JPEG và decode.
      *     Nếu use_mjpeg=false thì đọc raw YUY2.
+     *     Thêm queue leaky để bỏ frame cũ khi xử lý không kịp.
      *     Sau đó convert sang BGR để publish encoding bgr8.
      *
      * Output:
-     *     Chuỗi pipeline GStreamer kết thúc bằng appsink.
+     *     Chuỗi pipeline GStreamer kết thúc bằng appsink low-latency.
      */
     std::stringstream pipelineStream;
 
@@ -153,6 +269,7 @@ std::string CameraUsbGstNode::buildPipelineString() const
             << "image/jpeg,width=" << width_
             << ",height=" << height_
             << ",framerate=" << fps_ << "/1 ! "
+            << "queue max-size-buffers=1 leaky=downstream ! "
             << "jpegparse ! "
             << "jpegdec ! ";
     }
@@ -161,13 +278,15 @@ std::string CameraUsbGstNode::buildPipelineString() const
         pipelineStream
             << "video/x-raw,format=YUY2,width=" << width_
             << ",height=" << height_
-            << ",framerate=" << fps_ << "/1 ! ";
+            << ",framerate=" << fps_ << "/1 ! "
+            << "queue max-size-buffers=1 leaky=downstream ! ";
     }
 
     pipelineStream
         << "videoconvert ! "
         << "video/x-raw,format=BGR ! "
-        << "appsink name=sink emit-signals=false sync=false max-buffers=1 drop=true";
+        << "appsink name=sink emit-signals=false sync=false async=false "
+        << "max-buffers=1 drop=true enable-last-sample=false";
 
     return pipelineStream.str();
 }
@@ -269,9 +388,9 @@ void CameraUsbGstNode::publishFrame()
      *     Frame BGR từ GStreamer appsink.
      *
      * Logic:
-     *     Pull sample, lấy buffer/caps, map dữ liệu ảnh,
-     *     tạo Image message, tạo CameraInfo cùng timestamp/frame_id,
-     *     publish ra topic đã cấu hình.
+     *     Pull sample với timeout ngắn để tránh block lâu.
+     *     Lấy buffer/caps, map dữ liệu ảnh, tạo Image message.
+     *     CameraInfo được lấy từ camera_info.yaml thông qua camera_info_manager.
      *
      * Output:
      *     Publish ảnh và camera info đồng bộ header.
@@ -288,7 +407,7 @@ void CameraUsbGstNode::publishFrame()
 
     GstSample *sample = gst_app_sink_try_pull_sample(
         GST_APP_SINK(appSink_),
-        500 * GST_MSECOND);
+        5 * GST_MSECOND);
 
     if (sample == nullptr)
     {
@@ -447,53 +566,34 @@ sensor_msgs::msg::CameraInfo CameraUsbGstNode::createCameraInfoMessage(
 {
     /**
      * Mô tả:
-     *     Tạo CameraInfo message từ thông số calibration mặc định.
+     *     Tạo CameraInfo message từ file calibration YAML.
      *
      * Input:
      *     imageHeader: header của Image message.
      *
      * Logic:
-     *     Header của CameraInfo giống Image để đồng bộ timestamp và frame_id.
-     *     Hiện tại vẫn giữ thông số calibration 1280x720 đã có trong node cũ.
-     *     Nếu dùng nhiều camera thật, nên calibrate riêng từng camera.
+     *     Nếu cameraInfoManager_ đã load được camera_info.yaml thì lấy trực tiếp
+     *     thông số D, K, R, P từ file calib.
+     *     Nếu chưa load được file calib thì publish CameraInfo tối thiểu.
+     *     Header được cập nhật theo Image để đồng bộ timestamp và frame_id.
      *
      * Output:
      *     CameraInfo message publish ra topic camera info đã cấu hình.
      */
     sensor_msgs::msg::CameraInfo cameraInfoMsg;
 
+    if (cameraInfoManager_ != nullptr && cameraInfoManager_->isCalibrated())
+    {
+        cameraInfoMsg = cameraInfoManager_->getCameraInfo();
+    }
+    else
+    {
+        cameraInfoMsg.width = static_cast<uint32_t>(width_);
+        cameraInfoMsg.height = static_cast<uint32_t>(height_);
+        cameraInfoMsg.distortion_model = "plumb_bob";
+    }
+
     cameraInfoMsg.header = imageHeader;
-
-    cameraInfoMsg.width = static_cast<uint32_t>(width_);
-    cameraInfoMsg.height = static_cast<uint32_t>(height_);
-
-    cameraInfoMsg.distortion_model = "plumb_bob";
-
-    cameraInfoMsg.d = {
-        -0.443484,
-         0.171123,
-         0.003918,
-        -0.003198,
-         0.000000
-    };
-
-    cameraInfoMsg.k = {
-        914.40395, 0.0,       679.75175,
-        0.0,       913.65113, 329.37983,
-        0.0,       0.0,       1.0
-    };
-
-    cameraInfoMsg.r = {
-        1.0, 0.0, 0.0,
-        0.0, 1.0, 0.0,
-        0.0, 0.0, 1.0
-    };
-
-    cameraInfoMsg.p = {
-        681.38861, 0.0,       688.52428, 0.0,
-        0.0,       844.24647, 326.42191, 0.0,
-        0.0,       0.0,       1.0,       0.0
-    };
 
     return cameraInfoMsg;
 }

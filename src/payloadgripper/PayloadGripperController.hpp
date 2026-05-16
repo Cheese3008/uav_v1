@@ -52,12 +52,13 @@ private:
      * Logic:
      *     - Đọc topic object pose, object valid và parameter state machine
      *     - Đọc gain điều khiển XY để đưa UAV vào tâm vật
-     *     - Đọc bán kính vùng tâm, độ cao gắp cố định, vận tốc hạ và hành vi servo khi active/deactivate
+     *     - Đọc bán kính vùng tâm, điều kiện ổn định, độ cao gắp, vận tốc hạ và servo
      *
      * Output:
      *     Cập nhật các biến parameter nội bộ.
      */
     void loadParameters();
+
     /**
      * Mô tả:
      *     Reset toàn bộ biến runtime cho một lượt gắp mới.
@@ -108,7 +109,6 @@ private:
      */
     void completeMissionOnce();
 
-
     /**
      * Mô tả:
      *     Callback nhận pose vật thể trong hệ world/NED.
@@ -134,7 +134,7 @@ private:
      *     msg: Bool, true là đang thấy vật, false là mất vật.
      *
      * Logic:
-     *     - Khi false thì xóa pose hiện tại để controller quay về SearchObject nếu chưa bắt đầu hạ
+     *     - Khi false thì xóa pose hiện tại
      *
      * Output:
      *     Cập nhật objectValidExternal_ và objectWorld_.validPose.
@@ -211,14 +211,13 @@ private:
 
     /**
      * Mô tả:
-     *     Tính vận tốc Z hạ xuống độ cao gắp cố định.
+     *     Tính vận tốc Z hạ xuống độ cao gắp theo local Z.
      *
      * Input:
      *     Không có.
      *
      * Logic:
-     *     - Lấy độ cao hiện tại từ PX4 local position
-     *     - Nếu cao hơn grab_target_altitude thì hạ với descend_velocity
+     *     - Nếu abs(local_z) cao hơn grab_target_altitude thì hạ với descend_velocity
      *     - Nếu đã tới hoặc thấp hơn độ cao gắp thì dừng Z
      *
      * Output:
@@ -235,7 +234,8 @@ private:
      *
      * Logic:
      *     - PX4 local position thường có z âm khi UAV bay lên
-     *     - Dùng abs(z) để ra độ cao tương đối so với local origin
+     *     - Dùng abs(z) để ra độ cao tương đối
+     *     - Nếu EKF local z đang dùng/ràng buộc bởi rangefinder thì giá trị này bám theo nguồn range
      *
      * Output:
      *     Độ cao hiện tại của UAV, đơn vị mét.
@@ -265,7 +265,6 @@ private:
      *     Không có.
      *
      * Logic:
-     *     - So sánh độ cao hiện tại với savedReturnAltitude_
      *     - Nếu chưa lên đủ cao thì trả về vận tốc âm theo NED để bay lên
      *     - Nếu đã tới độ cao lưu thì dừng Z
      *
@@ -310,24 +309,26 @@ private:
 
     void handleSearchObjectState(bool objectLost);
     void handleApproachObjectState(float dt_s, bool objectLost);
+
     /**
      * Mô tả:
-     *     Hạ UAV xuống độ cao gắp cố định. Nếu vẫn còn thấy object thì tiếp tục chỉnh XY.
+     *     Hạ UAV xuống độ cao gắp theo local Z. Nếu lệch tâm thì tạm dừng hạ.
      *
      * Input:
      *     dt_s: chu kỳ cập nhật mode.
      *
      * Logic:
-     *     - Không quay lại SearchObject khi mất object trong lúc đang hạ
-     *     - Nếu còn thấy object thì dùng P-control để chỉnh XY
-     *     - Nếu mất object thì đặt trực tiếp vx = 0, vy = 0 và tiếp tục hạ theo độ cao cố định
-     *     - Khi tới grab_target_altitude thì in log ra terminal và chuyển sang GrabReady
-     *     - Nếu quá timeout thì vẫn chuyển sang GrabReady để tránh kẹt state
+     *     - Nếu còn thấy object thì tiếp tục chỉnh XY
+     *     - Nếu object vẫn nằm trong vùng tâm thì mới cho hạ Z
+     *     - Nếu object lệch tâm hoặc mất object thì vz = 0 để tránh hạ lệch
+     *     - Khi tới grab_target_altitude thì chuyển sang GrabReady
+     *     - Nếu quá timeout mà chưa tới độ cao thì giữ vị trí, không kích gắp
      *
      * Output:
      *     Publish velocity setpoint XYZ cho PX4.
      */
     void handleDescendToGrabHeightState(float dt_s);
+
     void handleGrabReadyState(float dt_s);
     void handleClimbToSavedAltitudeState(float dt_s);
 
@@ -343,25 +344,27 @@ private:
 
     std::string objectPoseTopic_;
     std::string objectValidTopic_;
-    Eigen::Vector2f computeRadialGateErrorXY(
-        const Eigen::Vector2f &errorXY,
-        float radius) const;
 
     float paramObjectTimeout_{1.0f};
 
     float paramXyKp_{0.8f};
-    float paramXyDeadband_{0.03f};
+    float paramXyDeadband_{0.02f};
     float paramXyMaxVelocity_{1.5f};
-    float paramSlewAcc_{2.5f};
+    float paramSlewAcc_{0.9f};
 
-    float paramCenterGateRadius_{0.30f};
-    float paramApproachSettleTime_{0.20f};
+    float paramCenterGateRadius_{0.08f};
+    float paramCenterStableCommandVelocity_{0.08f};
+    float paramApproachSettleTime_{0.80f};
 
-    float paramGrabTargetAltitude_{0.35f};
-    float paramGrabAltitudeTolerance_{0.03f};
-    float paramDescendVelocity_{0.25f};
+    float paramGrabTargetAltitude_{1.0f};
+    float paramGrabAltitudeTolerance_{0.05f};
+    float paramDescendVelocity_{0.20f};
 
-    float paramDescendTimeout_{8.0f};
+    bool paramDescendPauseWhenUnstable_{true};
+
+    float paramDescendTimeout_{25.0f};
+    bool paramAllowGrabOnDescendTimeout_{false};
+
     float paramGrabReadySettleTime_{0.50f};
     float paramClimbVelocity_{0.25f};
     float paramClimbAltitudeTolerance_{0.05f};

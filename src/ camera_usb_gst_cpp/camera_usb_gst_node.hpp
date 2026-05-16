@@ -1,15 +1,19 @@
-#ifndef CAMERA_USB_GST_CPP_CAMERA_USB_GST_NODE_HPP_
-#define CAMERA_USB_GST_CPP_CAMERA_USB_GST_NODE_HPP_
+#ifndef CAMERA_USB_GST_NODE_HPP_
+#define CAMERA_USB_GST_NODE_HPP_
+
+#include <memory>
+#include <string>
 
 #include <gst/gst.h>
 #include <gst/app/gstappsink.h>
 
 #include <rclcpp/rclcpp.hpp>
+
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
 #include <std_msgs/msg/header.hpp>
 
-#include <string>
+#include <camera_info_manager/camera_info_manager.hpp>
 
 namespace camera_usb_gst_cpp
 {
@@ -17,47 +21,98 @@ namespace camera_usb_gst_cpp
 class CameraUsbGstNode : public rclcpp::Node
 {
 public:
-    explicit CameraUsbGstNode();
-    ~CameraUsbGstNode() override;
+    /**
+     * Mô tả:
+     *     Constructor khởi tạo node đọc USB camera bằng GStreamer.
+     *
+     * Input:
+     *     Không có input trực tiếp.
+     *
+     * Logic:
+     *     Đọc parameter, load camera_info.yaml, tạo publisher,
+     *     khởi động pipeline GStreamer và timer publish ảnh.
+     *
+     * Output:
+     *     Node sẵn sàng publish Image và CameraInfo.
+     */
+    CameraUsbGstNode();
+
+    /**
+     * Mô tả:
+     *     Destructor dừng pipeline và giải phóng tài nguyên camera.
+     *
+     * Input:
+     *     Không có.
+     *
+     * Logic:
+     *     Gọi stopPipeline().
+     *
+     * Output:
+     *     Camera được release an toàn.
+     */
+    ~CameraUsbGstNode();
 
 private:
     /**
      * Mô tả:
-     *     Đọc toàn bộ parameter cấu hình USB camera, topic ảnh và topic CameraInfo.
+     *     Đọc parameter cấu hình USB camera và camera calibration.
      *
      * Input:
-     *     Không có input trực tiếp.
-     *     Dữ liệu lấy từ ROS2 parameter:
-     *         device_path, width, height, fps, frame_id,
-     *         topic_name, camera_info_topic, use_mjpeg.
+     *     ROS2 parameters.
      *
      * Logic:
-     *     Khai báo parameter mặc định, đọc giá trị parameter,
-     *     kiểm tra các giá trị quan trọng để tránh chạy sai cấu hình.
+     *     Khai báo parameter mặc định, đọc giá trị, kiểm tra hợp lệ.
      *
      * Output:
-     *     Cập nhật các biến cấu hình nội bộ của node.
+     *     Cập nhật biến cấu hình nội bộ.
      */
     void loadParameters();
 
     /**
      * Mô tả:
-     *     Tạo chuỗi pipeline GStreamer để đọc USB camera.
+     *     Chuẩn hóa đường dẫn camera_info.
      *
      * Input:
-     *     devicePath_ : đường dẫn camera, ví dụ /dev/camera_front hoặc /dev/camera_down.
-     *     width_      : chiều rộng ảnh.
-     *     height_     : chiều cao ảnh.
-     *     fps_        : tốc độ khung hình.
-     *     useMjpeg_   : chọn MJPG hoặc raw YUYV.
+     *     cameraInfoUrl: có thể là đường dẫn thường hoặc file URI.
      *
      * Logic:
-     *     Với USB camera hiện tại, MJPG cần io-mode=2 và jpegparse
-     *     để tránh lỗi not-negotiated.
-     *     Pipeline chuyển ảnh cuối cùng sang BGR để publish encoding bgr8.
+     *     Nếu đã có dạng xxx:// thì giữ nguyên.
+     *     Nếu là đường dẫn thường thì thêm file:// phía trước.
      *
      * Output:
-     *     Trả về chuỗi pipeline GStreamer hoàn chỉnh.
+     *     URL hợp lệ cho camera_info_manager.
+     */
+    std::string normalizeCameraInfoUrl(const std::string &cameraInfoUrl) const;
+
+    /**
+     * Mô tả:
+     *     Load thông số camera calibration từ file YAML.
+     *
+     * Input:
+     *     cameraName_, cameraInfoUrl_.
+     *
+     * Logic:
+     *     Tạo CameraInfoManager và load file calibration.
+     *     Nếu không load được thì cảnh báo và publish CameraInfo tối thiểu.
+     *
+     * Output:
+     *     cameraInfoManager_ chứa thông số calibration nếu load thành công.
+     */
+    void loadCameraCalibration();
+
+    /**
+     * Mô tả:
+     *     Tạo chuỗi pipeline GStreamer.
+     *
+     * Input:
+     *     devicePath_, width_, height_, fps_, useMjpeg_.
+     *
+     * Logic:
+     *     Dùng MJPEG hoặc YUY2, thêm queue leaky để giảm delay,
+     *     convert sang BGR và đẩy ra appsink.
+     *
+     * Output:
+     *     Chuỗi pipeline GStreamer.
      */
     std::string buildPipelineString() const;
 
@@ -66,72 +121,62 @@ private:
      *     Khởi động pipeline GStreamer.
      *
      * Input:
-     *     Pipeline string được tạo từ buildPipelineString().
+     *     Pipeline string từ buildPipelineString().
      *
      * Logic:
-     *     Parse pipeline bằng gst_parse_launch,
-     *     lấy appsink tên "sink",
-     *     chuyển pipeline sang trạng thái PLAYING.
+     *     Parse pipeline, lấy appsink, set pipeline sang PLAYING.
      *
      * Output:
-     *     pipeline_ và appSink_ sẵn sàng để đọc frame.
+     *     pipeline_ và appSink_ sẵn sàng đọc frame.
      */
     void startPipeline();
 
     /**
      * Mô tả:
-     *     Dừng pipeline GStreamer và giải phóng USB camera.
+     *     Dừng pipeline GStreamer.
      *
      * Input:
-     *     pipeline_ và appSink_ hiện tại.
+     *     pipeline_, appSink_ hiện tại.
      *
      * Logic:
-     *     Chuyển pipeline về GST_STATE_NULL,
-     *     sau đó unref appSink_ và pipeline_.
+     *     Set pipeline về NULL và unref object.
      *
      * Output:
-     *     Camera được release sạch khi node tắt.
+     *     Camera được giải phóng.
      */
     void stopPipeline();
 
     /**
      * Mô tả:
-     *     Callback timer chính để lấy frame từ appsink và publish ra ROS2.
+     *     Đọc frame từ appsink và publish Image + CameraInfo.
      *
      * Input:
-     *     Frame mới nhất từ GStreamer appsink.
+     *     Frame từ GStreamer appsink.
      *
      * Logic:
-     *     Pull sample từ appsink,
-     *     lấy buffer và caps,
-     *     map dữ liệu ảnh,
-     *     tạo sensor_msgs::msg::Image,
-     *     tạo sensor_msgs::msg::CameraInfo cùng timestamp,
-     *     publish ra topic ảnh và topic camera info đã cấu hình.
+     *     Pull sample, map buffer, tạo Image message,
+     *     lấy CameraInfo từ camera_info_manager rồi publish.
      *
      * Output:
-     *     Publish ảnh BGR8 và CameraInfo ra ROS2 topic.
+     *     Publish Image và CameraInfo đồng bộ timestamp.
      */
     void publishFrame();
 
     /**
      * Mô tả:
-     *     Tạo ROS2 Image message từ buffer ảnh BGR.
+     *     Tạo sensor_msgs::msg::Image từ buffer BGR.
      *
      * Input:
-     *     dataPtr     : con trỏ dữ liệu ảnh BGR.
-     *     dataSize    : kích thước buffer ảnh.
-     *     imageWidth  : chiều rộng ảnh.
-     *     imageHeight : chiều cao ảnh.
+     *     dataPtr: con trỏ dữ liệu ảnh.
+     *     dataSize: kích thước buffer.
+     *     imageWidth: chiều rộng ảnh.
+     *     imageHeight: chiều cao ảnh.
      *
      * Logic:
-     *     Kiểm tra buffer hợp lệ,
-     *     gán header stamp, frame_id,
-     *     encoding bgr8, step, width, height,
-     *     sau đó copy dữ liệu ảnh vào message.
+     *     Kiểm tra buffer, set header, encoding bgr8 và copy dữ liệu.
      *
      * Output:
-     *     Trả về sensor_msgs::msg::Image hợp lệ.
+     *     Image message hợp lệ.
      */
     sensor_msgs::msg::Image createImageMessage(
         const guint8 *dataPtr,
@@ -141,33 +186,35 @@ private:
 
     /**
      * Mô tả:
-     *     Tạo ROS2 CameraInfo message từ thông số calibration hiện tại.
+     *     Tạo CameraInfo message từ file calibration YAML.
      *
      * Input:
-     *     imageHeader: header của ảnh hiện tại để đồng bộ timestamp/frame_id.
+     *     imageHeader: header của Image message.
      *
      * Logic:
-     *     Gán width, height, distortion_model, camera_matrix K,
-     *     distortion coefficients D, rectification matrix R và projection matrix P.
-     *     Hiện tại thông số này đang dùng calibration mặc định 1280x720.
+     *     Nếu đã load calibration thì lấy K/D/R/P từ camera_info_manager.
+     *     Nếu chưa load được thì tạo CameraInfo tối thiểu.
+     *     Header luôn đồng bộ với Image.
      *
      * Output:
-     *     Trả về sensor_msgs::msg::CameraInfo để publish ra topic camera info.
+     *     CameraInfo message.
      */
     sensor_msgs::msg::CameraInfo createCameraInfoMessage(
         const std_msgs::msg::Header &imageHeader) const;
 
 private:
+    int width_;
+    int height_;
+    int fps_;
+    bool useMjpeg_;
+
     std::string devicePath_;
     std::string frameId_;
     std::string topicName_;
     std::string cameraInfoTopic_;
 
-    int width_;
-    int height_;
-    int fps_;
-
-    bool useMjpeg_;
+    std::string cameraName_;
+    std::string cameraInfoUrl_;
 
     GstElement *pipeline_;
     GstElement *appSink_;
@@ -175,8 +222,10 @@ private:
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr imagePub_;
     rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr cameraInfoPub_;
     rclcpp::TimerBase::SharedPtr timer_;
+
+    std::unique_ptr<camera_info_manager::CameraInfoManager> cameraInfoManager_;
 };
 
 }  // namespace camera_usb_gst_cpp
 
-#endif  // CAMERA_USB_GST_CPP_CAMERA_USB_GST_NODE_HPP_
+#endif  // CAMERA_USB_GST_NODE_HPP_

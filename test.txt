@@ -21,3 +21,19 @@ ros2 run ring_pass_mode ring_pass_mode
 
 colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release
 source install/setup.bash
+
+sudo systemctl disable --now cups.service
+sudo systemctl disable --now cups-browsed.service
+sudo systemctl disable --now bluetooth.service
+sudo systemctl disable --now bolt.service
+sudo systemctl disable --now colord.service
+sudo systemctl disable --now fwupd.service
+sudo systemctl disable --now kerneloops.service
+sudo systemctl disable --now lttng-sessiond.service
+sudo systemctl disable --now snapd.service
+sudo systemctl disable --now switcheroo-control.service
+sudo systemctl disable --now unattended-upgrades.service
+
+journalctl -u cube_detector.service -f
+journalctl -u payload_gripper.service -f
+journalctl -u microxrce-agent.service -f

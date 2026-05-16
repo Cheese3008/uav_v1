@@ -49,18 +49,24 @@ void PayloadGripperController::loadParameters()
     node_.declare_parameter<float>("object_timeout", 1.0f);
 
     node_.declare_parameter<float>("xy_kp", 0.8f);
-    node_.declare_parameter<float>("xy_deadband", 0.03f);
+    node_.declare_parameter<float>("xy_deadband", 0.02f);
     node_.declare_parameter<float>("xy_max_velocity", 1.5f);
     node_.declare_parameter<float>("slew_acc", 0.9f);
 
-    node_.declare_parameter<float>("center_gate_radius", 0.38f);
-    node_.declare_parameter<float>("approach_settle_time", 0.50f);
+    node_.declare_parameter<float>("center_gate_radius", 0.08f);
+    node_.declare_parameter<float>("center_stable_command_velocity", 0.08f);
+    node_.declare_parameter<float>("approach_settle_time", 0.80f);
 
-    node_.declare_parameter<float>("grab_target_altitude", 0.35f);
-    node_.declare_parameter<float>("grab_altitude_tolerance", 0.03f);
-    node_.declare_parameter<float>("descend_velocity", 0.25f);
+    node_.declare_parameter<float>("grab_target_altitude", 0.5f);
+    node_.declare_parameter<float>("grab_altitude_tolerance", 0.05f);
+    node_.declare_parameter<float>("descend_velocity", 0.20f);
+    node_.declare_parameter<bool>("descend_pause_when_unstable", true);
 
-    node_.declare_parameter<float>("descend_timeout", 8.0f);
+    // Timeout chỉ dùng để báo lỗi/giữ vị trí an toàn.
+    // Mặc định KHÔNG cho timeout mà vẫn gắp.
+    node_.declare_parameter<float>("descend_timeout", 25.0f);
+    node_.declare_parameter<bool>("allow_grab_on_descend_timeout", false);
+
     node_.declare_parameter<float>("grab_ready_settle_time", 0.50f);
     node_.declare_parameter<float>("climb_velocity", 0.25f);
     node_.declare_parameter<float>("climb_altitude_tolerance", 0.05f);
@@ -79,13 +85,17 @@ void PayloadGripperController::loadParameters()
     node_.get_parameter("slew_acc", paramSlewAcc_);
 
     node_.get_parameter("center_gate_radius", paramCenterGateRadius_);
+    node_.get_parameter("center_stable_command_velocity", paramCenterStableCommandVelocity_);
     node_.get_parameter("approach_settle_time", paramApproachSettleTime_);
 
     node_.get_parameter("grab_target_altitude", paramGrabTargetAltitude_);
     node_.get_parameter("grab_altitude_tolerance", paramGrabAltitudeTolerance_);
     node_.get_parameter("descend_velocity", paramDescendVelocity_);
+    node_.get_parameter("descend_pause_when_unstable", paramDescendPauseWhenUnstable_);
 
     node_.get_parameter("descend_timeout", paramDescendTimeout_);
+    node_.get_parameter("allow_grab_on_descend_timeout", paramAllowGrabOnDescendTimeout_);
+
     node_.get_parameter("grab_ready_settle_time", paramGrabReadySettleTime_);
     node_.get_parameter("climb_velocity", paramClimbVelocity_);
     node_.get_parameter("climb_altitude_tolerance", paramClimbAltitudeTolerance_);
@@ -102,6 +112,7 @@ void PayloadGripperController::loadParameters()
     paramSlewAcc_ = std::max(paramSlewAcc_, 0.0f);
 
     paramCenterGateRadius_ = std::max(paramCenterGateRadius_, 1e-3f);
+    paramCenterStableCommandVelocity_ = std::max(paramCenterStableCommandVelocity_, 0.0f);
     paramApproachSettleTime_ = std::max(paramApproachSettleTime_, 0.0f);
 
     paramGrabTargetAltitude_ = std::max(paramGrabTargetAltitude_, 0.01f);
@@ -113,6 +124,19 @@ void PayloadGripperController::loadParameters()
     paramClimbVelocity_ = std::max(paramClimbVelocity_, 0.0f);
     paramClimbAltitudeTolerance_ = std::max(paramClimbAltitudeTolerance_, 0.005f);
     paramClimbTimeout_ = std::max(paramClimbTimeout_, 0.1f);
+
+    RCLCPP_INFO(
+        node_.get_logger(),
+        "[PG] Params | center_gate=%.3f stable_cmd=%.3f settle=%.2f pause_descend=%d xy_kp=%.2f deadband=%.3f grab_alt=%.3f descend_timeout=%.2f allow_timeout_grab=%d",
+        paramCenterGateRadius_,
+        paramCenterStableCommandVelocity_,
+        paramApproachSettleTime_,
+        static_cast<int>(paramDescendPauseWhenUnstable_),
+        paramXyKp_,
+        paramXyDeadband_,
+        paramGrabTargetAltitude_,
+        paramDescendTimeout_,
+        static_cast<int>(paramAllowGrabOnDescendTimeout_));
 }
 
 void PayloadGripperController::onActivate()
@@ -222,6 +246,12 @@ void PayloadGripperController::objectValidCallback(const std_msgs::msg::Bool::Sh
 
 void PayloadGripperController::updateSetpoint(float dt_s)
 {
+    if (completedReported_)
+    {
+        holdPosition();
+        return;
+    }
+
     const bool objectLost = checkObjectLost();
 
     if (state_ == State::SearchObject || state_ == State::ApproachObject)
@@ -235,6 +265,7 @@ void PayloadGripperController::updateSetpoint(float dt_s)
             RCLCPP_INFO(node_.get_logger(), "[PG] Object acquired");
         }
     }
+
     objectLostPrev_ = objectLost;
 
     switch (state_)
@@ -285,6 +316,7 @@ void PayloadGripperController::handleApproachObjectState(float dt_s, bool object
 {
     if (objectLost)
     {
+        approachSettledTime_ = 0.0f;
         switchToState(State::SearchObject);
         holdPosition();
         return;
@@ -297,23 +329,21 @@ void PayloadGripperController::handleApproachObjectState(float dt_s, bool object
     const Eigen::Vector2f errorXY(relativePosition.x(), relativePosition.y());
     const float lateralError = errorXY.norm();
 
-    // Sai số theo bán kính R:
-    // - Nếu UAV đã nằm trong vùng R quanh object thì controlErrorXY = 0
-    // - Nếu nằm ngoài R thì chỉ điều khiển phần vượt ra ngoài R
-    const Eigen::Vector2f controlErrorXY =
-        computeRadialGateErrorXY(errorXY, paramCenterGateRadius_);
-
-    const float radialError = controlErrorXY.norm();
-    const Eigen::Vector2f velocityXY = computeVelocityXY(controlErrorXY, dt_s);
+    // Dùng lỗi thật để điều khiển UAV vào đúng tâm object.
+    // Không dùng radial gate ở Approach, vì radial gate sẽ làm UAV đứng yên
+    // khi còn lệch trong bán kính gate.
+    const Eigen::Vector2f velocityXY = computeVelocityXY(errorXY, dt_s);
+    const float commandNorm = velocityXY.norm();
 
     trajectorySetpoint_->update(
         Eigen::Vector3f(velocityXY.x(), velocityXY.y(), 0.0f),
         std::nullopt,
         std::nullopt);
 
-    // Điều kiện vào vùng tâm bây giờ dùng radialError.
-    // radialError = 0 nghĩa là UAV đã nằm trong bán kính R.
-    if (radialError <= paramXyDeadband_)
+    const bool objectCentered = lateralError <= paramCenterGateRadius_;
+    const bool xyCommandSmall = commandNorm <= paramCenterStableCommandVelocity_;
+
+    if (objectCentered && xyCommandSmall)
     {
         approachSettledTime_ += std::max(dt_s, 0.0f);
     }
@@ -326,16 +356,18 @@ void PayloadGripperController::handleApproachObjectState(float dt_s, bool object
         node_.get_logger(),
         *(node_.get_clock()),
         500,
-        "[PG][ApproachObject] errXY=(%.3f, %.3f) lateral=%.3f R=%.3f radialErr=%.3f settled=%.2f/%.2f cmdXY=(%.3f, %.3f)",
+        "[PG][ApproachObject] errXY=(%.3f, %.3f) lateral=%.3f centerR=%.3f centered=%d cmdXY=(%.3f, %.3f) cmdNorm=%.3f stableCmd=%.3f settled=%.2f/%.2f",
         errorXY.x(),
         errorXY.y(),
         lateralError,
         paramCenterGateRadius_,
-        radialError,
-        approachSettledTime_,
-        paramApproachSettleTime_,
+        static_cast<int>(objectCentered),
         velocityXY.x(),
-        velocityXY.y());
+        velocityXY.y(),
+        commandNorm,
+        paramCenterStableCommandVelocity_,
+        approachSettledTime_,
+        paramApproachSettleTime_);
 
     if (approachSettledTime_ >= paramApproachSettleTime_)
     {
@@ -351,24 +383,6 @@ void PayloadGripperController::handleApproachObjectState(float dt_s, bool object
     }
 }
 
-Eigen::Vector2f PayloadGripperController::computeRadialGateErrorXY(
-    const Eigen::Vector2f &errorXY,
-    float radius) const
-{
-    const float lateralError = errorXY.norm();
-    const float safeRadius = std::max(radius, 1e-3f);
-
-    if (lateralError <= safeRadius)
-    {
-        return Eigen::Vector2f(0.0f, 0.0f);
-    }
-
-    const float outsideError = lateralError - safeRadius;
-    const Eigen::Vector2f directionXY = errorXY / std::max(lateralError, 1e-3f);
-
-    return directionXY * outsideError;
-}
-
 void PayloadGripperController::handleDescendToGrabHeightState(float dt_s)
 {
     descendTime_ += std::max(dt_s, 0.0f);
@@ -377,9 +391,6 @@ void PayloadGripperController::handleDescendToGrabHeightState(float dt_s)
     Eigen::Vector2f velocityXY(0.0f, 0.0f);
     float lateralError = -1.0f;
 
-    // Khi dang ha xuong, neu camera/tracker van con thay object thi tiep tuc chinh XY.
-    // Neu object bi mat do khoi qua lon che het camera, khong quay lai Search nua,
-    // chi dua lenh XY ve 0 va tiep tuc ha den do cao gap co dinh.
     if (objectVisible)
     {
         const Eigen::Vector3f dronePosition = vehicleLocalPosition_->positionNed();
@@ -392,18 +403,41 @@ void PayloadGripperController::handleDescendToGrabHeightState(float dt_s)
     }
     else
     {
-        // Khong co data object trong luc dang ha:
-        // - Khong quay lai SearchObject
-        // - Khong tiep tuc sua XY theo pose cu
-        // - Dat truc tiep vx = 0, vy = 0
-        // - Van tiep tuc ha xuong do cao gap co dinh
+        // Nếu mất object trong lúc đang hạ, dừng XY và dừng hạ để tránh hạ lệch.
         vxFiltered_ = 0.0f;
         vyFiltered_ = 0.0f;
         velocityXY = Eigen::Vector2f(0.0f, 0.0f);
     }
 
+    const bool centeredEnoughToDescend =
+        objectVisible &&
+        lateralError >= 0.0f &&
+        lateralError <= paramCenterGateRadius_;
+
     const float altitude = getVehicleAltitude();
-    const float velocityZ = computeFixedDescentVelocity();
+
+    float velocityZ = 0.0f;
+
+    if (!paramDescendPauseWhenUnstable_)
+    {
+        velocityZ = computeFixedDescentVelocity();
+    }
+    else if (centeredEnoughToDescend)
+    {
+        velocityZ = computeFixedDescentVelocity();
+    }
+    else
+    {
+        velocityZ = 0.0f;
+    }
+
+
+    const float grabThresholdAltitude =
+        paramGrabTargetAltitude_ + paramGrabAltitudeTolerance_;
+
+    const float altitudeErrorToGrab =
+        altitude - grabThresholdAltitude;
+
     const bool altitudeReady = isAtGrabAltitude();
     const bool timeout = descendTime_ >= paramDescendTimeout_;
 
@@ -415,40 +449,65 @@ void PayloadGripperController::handleDescendToGrabHeightState(float dt_s)
     RCLCPP_INFO_THROTTLE(
         node_.get_logger(),
         *(node_.get_clock()),
-        500,
-        "[PG][DescendToGrabHeight] visible=%d lateral=%.3f altitude=%.3f target=%.3f tol=%.3f cmd=(%.3f, %.3f, %.3f) time=%.2f/%.2f",
+        300,
+        "[PG][DescendToGrabHeight] "
+        "visible=%d centered=%d lateral=%.3f centerR=%.3f | "
+        "local_alt=%.3f target=%.3f tol=%.3f threshold=%.3f alt_err=%.3f altitudeReady=%d | "
+        "cmd=(%.3f, %.3f, %.3f) time=%.2f/%.2f timeout=%d allow_timeout_grab=%d",
         static_cast<int>(objectVisible),
+        static_cast<int>(centeredEnoughToDescend),
         lateralError,
+        paramCenterGateRadius_,
         altitude,
         paramGrabTargetAltitude_,
         paramGrabAltitudeTolerance_,
+        grabThresholdAltitude,
+        altitudeErrorToGrab,
+        static_cast<int>(altitudeReady),
         velocityXY.x(),
         velocityXY.y(),
         velocityZ,
         descendTime_,
-        paramDescendTimeout_);
+        paramDescendTimeout_,
+        static_cast<int>(timeout),
+        static_cast<int>(paramAllowGrabOnDescendTimeout_));
 
-    if (altitudeReady || timeout)
+    if (altitudeReady)
     {
-        if (altitudeReady)
-        {
-            RCLCPP_WARN(
-                node_.get_logger(),
-                "[PG] DA TOI DO CAO GAP | altitude=%.3f m target=%.3f m tolerance=%.3f m",
-                altitude,
-                paramGrabTargetAltitude_,
-                paramGrabAltitudeTolerance_);
-        }
-        else
-        {
-            RCLCPP_WARN(
-                node_.get_logger(),
-                "[PG] Descend timeout, switching to GrabReady anyway | altitude=%.3f m target=%.3f m",
-                altitude,
-                paramGrabTargetAltitude_);
-        }
+        RCLCPP_WARN(
+            node_.get_logger(),
+            "[PG] DA TOI DO CAO GAP THEO LOCAL Z | local_alt=%.3f m target=%.3f m tolerance=%.3f m",
+            altitude,
+            paramGrabTargetAltitude_,
+            paramGrabAltitudeTolerance_);
 
         switchToState(State::GrabReady);
+        return;
+    }
+
+    if (timeout)
+    {
+        RCLCPP_WARN_THROTTLE(
+            node_.get_logger(),
+            *(node_.get_clock()),
+            1000,
+            "[PG] Descend timeout but NOT at grab altitude. HOLD, do not grab | local_alt=%.3f m target=%.3f m allow_timeout_grab=%d",
+            altitude,
+            paramGrabTargetAltitude_,
+            static_cast<int>(paramAllowGrabOnDescendTimeout_));
+
+        if (paramAllowGrabOnDescendTimeout_)
+        {
+            RCLCPP_WARN(
+                node_.get_logger(),
+                "[PG] allow_grab_on_descend_timeout=true, switching to GrabReady anyway.");
+
+            switchToState(State::GrabReady);
+            return;
+        }
+
+        holdPosition();
+        return;
     }
 }
 
@@ -504,7 +563,7 @@ void PayloadGripperController::handleClimbToSavedAltitudeState(float dt_s)
         node_.get_logger(),
         *(node_.get_clock()),
         500,
-        "[PG][ClimbToSavedAltitude] altitude=%.3f saved=%.3f tol=%.3f cmd_z=%.3f time=%.2f/%.2f",
+        "[PG][ClimbToSavedAltitude] local_alt=%.3f saved=%.3f tol=%.3f cmd_z=%.3f time=%.2f/%.2f",
         altitude,
         savedReturnAltitude_,
         paramClimbAltitudeTolerance_,
@@ -520,7 +579,7 @@ void PayloadGripperController::handleClimbToSavedAltitudeState(float dt_s)
         {
             RCLCPP_WARN(
                 node_.get_logger(),
-                "[PG] Returned to saved altitude. altitude=%.3f m saved=%.3f m. Mission completed.",
+                "[PG] Returned to saved altitude. local_alt=%.3f m saved=%.3f m. Mission completed.",
                 altitude,
                 savedReturnAltitude_);
         }
@@ -528,7 +587,7 @@ void PayloadGripperController::handleClimbToSavedAltitudeState(float dt_s)
         {
             RCLCPP_WARN(
                 node_.get_logger(),
-                "[PG] Climb timeout. altitude=%.3f m saved=%.3f m. Completing anyway.",
+                "[PG] Climb timeout. local_alt=%.3f m saved=%.3f m. Completing anyway.",
                 altitude,
                 savedReturnAltitude_);
         }
@@ -586,6 +645,7 @@ float PayloadGripperController::computeFixedDescentVelocity() const
         return 0.0f;
     }
 
+    // PX4/NED: vz > 0 là đi xuống.
     return std::abs(paramDescendVelocity_);
 }
 
@@ -607,7 +667,7 @@ float PayloadGripperController::computeClimbVelocityToSavedAltitude() const
         return 0.0f;
     }
 
-    // PX4/NED: vz < 0 la bay len.
+    // PX4/NED: vz < 0 là bay lên.
     return -std::abs(paramClimbVelocity_);
 }
 
@@ -626,6 +686,7 @@ float PayloadGripperController::applySlew(float commandVelocity, float previousV
 {
     const float dt = std::max(dt_s, 1e-3f);
     const float maxDeltaVelocity = std::max(accelLimit, 0.0f) * dt;
+
     const float deltaVelocity = std::clamp(
         commandVelocity - previousVelocity,
         -maxDeltaVelocity,
@@ -680,14 +741,19 @@ std::string PayloadGripperController::stateName(State state) const
     {
     case State::SearchObject:
         return "SearchObject";
+
     case State::ApproachObject:
         return "ApproachObject";
+
     case State::DescendToGrabHeight:
         return "DescendToGrabHeight";
+
     case State::GrabReady:
         return "GrabReady";
+
     case State::ClimbToSavedAltitude:
         return "ClimbToSavedAltitude";
+
     default:
         return "Unknown";
     }

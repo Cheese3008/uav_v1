@@ -35,6 +35,10 @@ private:
 		cv::Point2f boxCenter;
 		cv::Point2f circleCenter;
 		float       circleRadius = 0.0f;
+
+		/** Pinhole pose: kich thuoc pixel va tam on dinh (minAreaRect + subpix neu bat). */
+		double      pose_pixel_width = 0.0;
+		cv::Point2f pose_center      = {0.0f, 0.0f};
 	};
 
 	/**
@@ -169,6 +173,28 @@ private:
 		int lab_l_max = 255;
 		int lab_a_max = 190;
 		int lab_b_max = 255;
+		// LAB bo sung: mask OR (vung chay sang / shadow) — giam phu thuoc 1 LAB range
+		bool lab_enable_overexposed_mask = true;
+		int lab_ov_l_min = 200;
+		int lab_ov_a_min = 120;
+		int lab_ov_b_min = 130;
+		int lab_ov_l_max = 255;
+		int lab_ov_a_max = 172;
+		int lab_ov_b_max = 185;
+		bool lab_enable_shadow_mask = false;
+		int lab_sh_l_min = 0;
+		int lab_sh_a_min = 125;
+		int lab_sh_b_min = 130;
+		int lab_sh_l_max = 95;
+		int lab_sh_a_max = 195;
+		int lab_sh_b_max = 225;
+		// Ratio: B-A (LAB) — gate AND len union mask; on dinh cam khi doi sang
+		bool  lab_ratio_ba_gate = false;
+		int   lab_ratio_ba_min   = 8;
+		// Optional BGR branch OR: R > k*G va R > k*B
+		bool   bgr_ratio_or_branch = false;
+		double bgr_r_over_g        = 1.02;
+		double bgr_r_over_b        = 1.02;
 		double clahe_clip_limit = 2.0;
 		int clahe_grid_size = 8;
 		double min_fill_ratio = 0.35;
@@ -212,6 +238,21 @@ private:
 		int max_lock_missed = 30;
 		double lock_max_dist_px = 120.0;
 		double lock_min_size_ratio = 0.5;
+		// Khi locked: detect trong ROI vuong tam lock; fallback full frame neu khong tim thay
+		int  lock_search_roi_half_extent_px = 200;
+		bool lock_roi_fallback_full_frame   = true;
+
+		// Mask temporal tren full-frame canvas (alpha * now + (1-alpha) * prev)
+		double mask_temporal_alpha = 0.55;
+
+		// Pose: minAreaRect + cornerSubPix tren contour
+		bool  pose_use_min_area_rect = true;
+		bool  pose_corner_subpix     = false;
+		int   pose_subpix_win        = 5;
+
+		// Texture reject: loai blob dong nhat (std qua thap tren kenh A)
+		bool   texture_reject_enable     = false;
+		double texture_min_lab_a_stddev  = 4.0;
 
 		// Timing
 		double last_seen_hold_timeout_s = 0.5;
@@ -244,19 +285,6 @@ private:
 		//   - target_valid publish false
 		//   - neu true thi van publish Kalman prediction ra filtered topics de tune
 		bool publish_prediction_when_lost = true;
-
-		// Debug control
-		// debug_enable: bat/tat /cube_detector/algorithm_debug.
-		// Khi false thi khong tao anh debug, khong blur, khong hconcat.
-		bool debug_enable = false;
-
-		// Bat/tat publish cac topic raw debug:
-		// /cube_detector/target_pose_camera_raw
-		// /cube_detector/target_pose_world_raw
-		bool debug_raw_pose_enable = false;
-
-		// Bat/tat publish /cube_detector/performance.
-		bool debug_performance_enable = true;
 	} _p;
 
 	// ───────────────────────── ROS I/O ──────────────────────────────
@@ -300,6 +328,11 @@ private:
 	// ──────────────── Cached / pre-computed resources ───────────────
 	cv::Mat _morph_kernel;
 	cv::Ptr<cv::CLAHE> _clahe;
+	cv::Mat _mask_temporal_prev;   // CV_32F, full-frame 0..1
+	cv::Mat _dbg_algorithm_mask_full; /**< Mask thuat toan (debug), full frame, sau temporal */
+	cv::Mat _dbg_algorithm_mask_pre_temporal; /**< Cung kich thuoc frame, sau morphology, truoc temporal */
+
+	cv::Rect _last_debug_roi; /**< ROI tim kiem khi locked; rong neu full frame */
 	cv::dnn::Net _yolo8_net;
 	cv::dnn::Net _yolo26_net;
 	bool _yolo8_loaded = false;
@@ -329,14 +362,27 @@ private:
 
 	// Detection pipeline
 	VictimModel detectVictimModel(const cv::Mat &frame);
-	bool detectBoxRegion(const cv::Mat &frame, cv::Rect &boxBbox, cv::Point2f &boxCenter);
-	bool detectBoxRegionAlgorithm(const cv::Mat &frame, cv::Rect &boxBbox, cv::Point2f &boxCenter);
+	bool detectBoxRegion(const cv::Mat &frame, VictimModel &vm);
+
+	void prepareAlgorithmLab(const cv::Mat &bgr, cv::Mat &lab);
+	void buildAlgorithmColorMask(const cv::Mat &lab, const cv::Mat &bgr, cv::Mat &mask);
+	void applyAlgorithmMorphology(cv::Mat &mask);
+	void applyMaskTemporalFullFrame(cv::Mat &mask_full);
+	bool makeAlgorithmMaskOnBgr(const cv::Mat &bgr, cv::Mat &mask);
+	/** Chi dung cho debug: LAB (BGR), mask sau threshold mau, mask sau morphology (cung ROI voi bgr). */
+	void makeAlgorithmMaskStagesOnBgr(
+		const cv::Mat &bgr,
+		cv::Mat &lab_bgr_vis,
+		cv::Mat &mask_after_color,
+		cv::Mat &mask_after_morph);
+	bool detectBoxRegionAlgorithm(const cv::Mat &frame, VictimModel &vm, bool allow_locked_roi);
+	cv::Rect computeLockedSearchRoi(const cv::Size &frame_size) const;
+	bool contourTextureAcceptable(const cv::Mat &lab, const std::vector<cv::Point> &contour) const;
 	bool detectBoxRegionYolo(
 		const cv::Mat &frame,
 		cv::dnn::Net &net,
 		const std::string &pipeline_name,
-		cv::Rect &boxBbox,
-		cv::Point2f &boxCenter);
+		VictimModel &vm);
 	bool makeAlgorithmMask(const cv::Mat &frame, cv::Mat &mask);
 	bool loadYoloModel(cv::dnn::Net &net, const std::string &model_path, const std::string &name);
 	bool detectCircularHandle(
